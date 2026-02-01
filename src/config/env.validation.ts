@@ -5,6 +5,7 @@ import {
   IsBoolean,
   IsEnum,
   IsNotEmpty,
+  IsOptional,
   Min,
   Max,
   MinLength,
@@ -116,6 +117,17 @@ export class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   MCP_RESOURCE_API_URL: string;
+
+  // Swagger API 문서 잠금 (둘 다 설정 시 Basic Auth 적용)
+  @IsOptional()
+  @IsString()
+  @MinLength(1, { message: 'SWAGGER_USER must be non-empty when set' })
+  SWAGGER_USER?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(1, { message: 'SWAGGER_PASSWORD must be non-empty when set' })
+  SWAGGER_PASSWORD?: string;
 }
 
 /**

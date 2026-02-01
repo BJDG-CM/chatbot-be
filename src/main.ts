@@ -81,6 +81,48 @@ async function bootstrap() {
 
   // ConfigService를 통해 환경 변수 가져오기 (검증된 값)
   const configService = app.get(ConfigService);
+
+  // Swagger API 문서 잠금: SWAGGER_USER/SWAGGER_PASSWORD 설정 시 Basic Auth 적용
+  const swaggerUser = configService.get<string>('SWAGGER_USER');
+  const swaggerPassword = configService.get<string>('SWAGGER_PASSWORD');
+  if (swaggerUser && swaggerPassword) {
+    const fastify = app.getHttpAdapter().getInstance();
+    fastify.addHook('preHandler', async (request, reply) => {
+      if (!request.url.startsWith('/api/docs')) return;
+      const authHeader = request.headers.authorization;
+      if (!authHeader?.startsWith('Basic ')) {
+        return reply
+          .status(401)
+          .header('WWW-Authenticate', 'Basic realm="Swagger API Docs"')
+          .send({
+            statusCode: 401,
+            message: 'Swagger 문서 접근에는 인증이 필요합니다.',
+          });
+      }
+      const encoded = authHeader.slice(6);
+      let decoded: string;
+      try {
+        decoded = Buffer.from(encoded, 'base64').toString('utf8');
+      } catch {
+        return reply
+          .status(401)
+          .header('WWW-Authenticate', 'Basic realm="Swagger API Docs"')
+          .send({ statusCode: 401, message: '잘못된 인증 정보입니다.' });
+      }
+      const colonIndex = decoded.indexOf(':');
+      const user = colonIndex === -1 ? decoded : decoded.slice(0, colonIndex);
+      const password = colonIndex === -1 ? '' : decoded.slice(colonIndex + 1);
+      if (user !== swaggerUser || password !== swaggerPassword) {
+        return reply
+          .status(401)
+          .header('WWW-Authenticate', 'Basic realm="Swagger API Docs"')
+          .send({
+            statusCode: 401,
+            message: '사용자명 또는 비밀번호가 올바르지 않습니다.',
+          });
+      }
+    });
+  }
   const port = configService.get<number>('PORT', 3000);
 
   // CORS 설정
