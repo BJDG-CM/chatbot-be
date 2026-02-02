@@ -20,6 +20,15 @@ import type {
   CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 
+/** list_resources 호출 결과 (캐시용) */
+export type ListResourcesResult = {
+  raw: unknown;
+  texts: string[];
+  resourceLinks: unknown[];
+  embeddedResources: unknown[];
+  filteredResources: Array<{ path: string; formats: string[] }>;
+};
+
 /**
  * MCP Client Service
  * MCP 서버와의 연결 및 Tool 호출을 관리합니다.
@@ -30,6 +39,14 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
 
   private client: Client | null = null;
   private transport: StreamableHTTPClientTransport | null = null;
+
+  /** list_resources 결과 캐시 (리소스 목록은 자주 바뀌지 않음) */
+  private cachedListResources: {
+    argsKey: string;
+    result: ListResourcesResult;
+    timestamp: number;
+  } | null = null;
+  private readonly LIST_RESOURCES_CACHE_TTL = 5 * 60 * 1000; // 5분
 
   constructor(private readonly config: ConfigService) {}
 
@@ -106,7 +123,10 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
     });
 
     client.setNotificationHandler(ResourceListChangedNotificationSchema, () => {
-      this.logger.debug('Resource list changed (notification)');
+      this.logger.debug(
+        'Resource list changed (notification), invalidating list_resources cache',
+      );
+      this.cachedListResources = null;
     });
   }
 
@@ -135,6 +155,58 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * list_resources 응답 파싱 (캐시 저장 및 일반 호출 경로에서 공통 사용)
+   */
+  private parseListResourcesResponse(res: {
+    content: Array<{ type: string; text?: string }>;
+  }): ListResourcesResult {
+    const texts: string[] = [];
+    const resourceLinks: unknown[] = [];
+    const embeddedResources: unknown[] = [];
+    const filteredResources: Array<{ path: string; formats: string[] }> = [];
+
+    for (const item of res.content) {
+      if (item.type === 'text') {
+        const text = item.text ?? '';
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.resources && Array.isArray(parsed.resources)) {
+            const pngPdfResources = parsed.resources.filter(
+              (resource: { path: string; formats: string[] }) =>
+                resource.formats &&
+                Array.isArray(resource.formats) &&
+                (resource.formats.includes('png') ||
+                  resource.formats.includes('pdf')),
+            );
+            filteredResources.push(...pngPdfResources);
+          } else {
+            texts.push(text);
+          }
+        } catch {
+          texts.push(text);
+        }
+        continue;
+      }
+      if (item.type === 'resource_link') {
+        resourceLinks.push(item);
+        continue;
+      }
+      if (item.type === 'resource') {
+        embeddedResources.push(item);
+        continue;
+      }
+    }
+
+    return {
+      raw: res,
+      texts,
+      resourceLinks,
+      embeddedResources,
+      filteredResources,
+    };
+  }
+
+  /**
    * Tool 호출
    * @param name Tool 이름
    * @param args Tool 인자
@@ -143,6 +215,20 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
   async callTool<
     TArgs extends Record<string, unknown> = Record<string, unknown>,
   >(name: string, args: TArgs) {
+    // list_resources는 자주 바뀌지 않으므로 캐시 사용
+    if (name === 'list_resources') {
+      const argsKey = JSON.stringify(args ?? {});
+      const now = Date.now();
+      if (
+        this.cachedListResources &&
+        this.cachedListResources.argsKey === argsKey &&
+        now - this.cachedListResources.timestamp < this.LIST_RESOURCES_CACHE_TTL
+      ) {
+        this.logger.debug('Using cached list_resources result');
+        return this.cachedListResources.result;
+      }
+    }
+
     const client = this.getConnectedClient();
 
     const req: CallToolRequest = {
@@ -152,7 +238,21 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
 
     const res = await client.request(req, CallToolResultSchema);
 
-    // 응답을 간단하게 파싱
+    // list_resources는 동일 파싱 로직으로 처리 후 캐시
+    if (name === 'list_resources') {
+      const result = this.parseListResourcesResponse(
+        res as { content: Array<{ type: string; text?: string }> },
+      );
+      const argsKey = JSON.stringify(args ?? {});
+      this.cachedListResources = {
+        argsKey,
+        result,
+        timestamp: Date.now(),
+      };
+      return result;
+    }
+
+    // 그 외 Tool: 기존 파싱
     const texts: string[] = [];
     const resourceLinks: any[] = [];
     const embeddedResources: any[] = [];
@@ -160,12 +260,9 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
 
     for (const item of res.content) {
       if (item.type === 'text') {
-        // JSON 문자열인지 확인하고 파싱 시도
         try {
           const parsed = JSON.parse(item.text);
-          // resources 배열이 있는 경우 (MCP 리소스 목록 응답)
           if (parsed.resources && Array.isArray(parsed.resources)) {
-            // PNG 또는 PDF 형식만 필터링
             const pngPdfResources = parsed.resources.filter(
               (resource: { path: string; formats: string[] }) =>
                 resource.formats &&
@@ -182,12 +279,10 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
         }
         continue;
       }
-
       if (item.type === 'resource_link') {
         resourceLinks.push(item);
         continue;
       }
-
       if (item.type === 'resource') {
         embeddedResources.push(item);
         continue;
