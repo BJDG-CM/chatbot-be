@@ -261,6 +261,33 @@ export class ChatOrchestrationService {
   }
 
   /**
+   * 마크다운에서 이미지 참조 추출: ![alt](path) 형태
+   * 첨부된 이미지(.png, .jpg 등) 경로만 반환
+   */
+  private parseImageReferencesFromMarkdown(content: string): string[] {
+    const paths: string[] = [];
+    const imageRefRegex = /!\[[^\]]*\]\(([^)]+)\)/g;
+    let match;
+    while ((match = imageRefRegex.exec(content)) !== null) {
+      const path = match[1].trim();
+      if (/\.(png|jpe?g|gif|webp)(\?|#|$)/i.test(path)) {
+        paths.push(path);
+      }
+    }
+    return paths;
+  }
+
+  /**
+   * 문서 경로 기준으로 상대 이미지 경로를 전체 리소스 경로로 변환
+   * 예: docPath="폴더/문서.md", imageRef="이미지.png" → "폴더/이미지.png"
+   */
+  private resolveImagePath(imageRef: string, docPath: string): string {
+    const lastSlash = docPath.lastIndexOf('/');
+    const dir = lastSlash === -1 ? '' : docPath.slice(0, lastSlash + 1);
+    return dir + imageRef;
+  }
+
+  /**
    * 질문과 관련된 하위 문서 찾기
    */
   private findRelevantSubDocuments(
@@ -550,6 +577,7 @@ export class ChatOrchestrationService {
     const contents: string[] = [];
     const allSubDocuments: Array<{ path: string; description: string }> = [];
     const usedResources: Array<{ path: string; formats: string[] }> = [];
+    const addedPaths = new Set<string>();
 
     for (const selected of selectedDocuments) {
       const docCandidate = documentCandidates.find(
@@ -560,16 +588,18 @@ export class ChatOrchestrationService {
           `\n\n## 리소스: ${docCandidate.title}\n\n${docCandidate.content}`,
         );
 
-        // 실제 사용된 리소스 정보 수집 (PDF/PNG만)
+        // 기존: 선택된 문서 자체가 pdf/png인 경우
         const hasPdf = docCandidate.formats.includes('pdf');
         const hasPng = docCandidate.formats.includes('png');
         if (hasPdf || hasPng) {
+          const pdfPngFormats = docCandidate.formats.filter(
+            (f) => f === 'pdf' || f === 'png',
+          );
           usedResources.push({
             path: docCandidate.path,
-            formats: docCandidate.formats.filter(
-              (f) => f === 'pdf' || f === 'png',
-            ),
+            formats: pdfPngFormats,
           });
+          addedPaths.add(docCandidate.path);
         }
 
         // 하위 문서도 수집
@@ -578,6 +608,62 @@ export class ChatOrchestrationService {
         }
       }
     }
+
+    // PDF 보강: 선택된 MD의 상위 단 이름(path 첫 세그먼트)과 일치하는 PDF 수집
+    for (const selected of selectedDocuments) {
+      const path = selected.path;
+      const firstSegment = path.split('/')[0];
+      for (const r of filteredResources) {
+        if (!r.formats) continue;
+        if (addedPaths.has(r.path)) continue;
+        if (r.formats.includes('pdf')) {
+          const pathLower = r.path.toLowerCase();
+          if (pathLower.endsWith('.png')) continue;
+          const match =
+            r.path === firstSegment ||
+            r.path === `${firstSegment}.pdf` ||
+            r.path.startsWith(`${firstSegment}.`);
+          if (match) {
+            usedResources.push({
+              path: r.path,
+              formats: ['pdf'],
+            });
+            addedPaths.add(r.path);
+          }
+        }
+      }
+    }
+
+    // PNG 보강: 선택된 마크다운 내용에 ![...](이미지.png) 형태로 참조된 이미지만 수집
+    for (const selected of selectedDocuments) {
+      const docCandidate = documentCandidates.find(
+        (d) => d.title === selected.title,
+      );
+      if (!docCandidate?.content) continue;
+      const imageRefs = this.parseImageReferencesFromMarkdown(
+        docCandidate.content,
+      );
+      for (const imageRef of imageRefs) {
+        const fullPath = this.resolveImagePath(imageRef, docCandidate.path);
+        const pathWithoutExt = fullPath.replace(/\.(png|jpe?g|gif|webp)$/i, '');
+        const r = filteredResources.find(
+          (x) =>
+            x.formats?.includes('png') &&
+            !addedPaths.has(x.path) &&
+            (x.path === fullPath ||
+              x.path === pathWithoutExt ||
+              x.path.toLowerCase() === fullPath.toLowerCase() ||
+              x.path.toLowerCase() === pathWithoutExt.toLowerCase()),
+        );
+        if (r) {
+          usedResources.push({ path: r.path, formats: ['png'] });
+          addedPaths.add(r.path);
+        }
+      }
+    }
+
+    // 참고 자료 최대 3개로 제한
+    const finalUsedResources = usedResources.slice(0, 3);
 
     // 하위 문서 중 질문과 관련된 문서 찾아서 추가로 가져오기
     if (allSubDocuments.length > 0) {
@@ -601,7 +687,7 @@ export class ChatOrchestrationService {
 
     return {
       content: contents.join('\n'),
-      usedResources,
+      usedResources: finalUsedResources,
     };
   }
 
@@ -680,18 +766,21 @@ export class ChatOrchestrationService {
             );
             if (pdfPngFormats.length > 0) {
               const resourceUrl = this.generateResourceUrl(resource.path);
-              // 문서 제목 추출 (마지막 부분만)
               const documentTitle = this.extractDocumentTitle(
                 resource.path,
                 resource.path,
                 pdfPngFormats,
               );
-              // PDF/PNG인 경우 format을 제목에 추가
-              const titleWithFormat = pdfPngFormats.includes('pdf')
-                ? `${documentTitle} (PDF)`
-                : pdfPngFormats.includes('png')
-                  ? `${documentTitle} (PNG)`
-                  : documentTitle;
+              const pathLower = resource.path.toLowerCase();
+              const titleWithFormat = pathLower.endsWith('.png')
+                ? `${documentTitle} (PNG)`
+                : pathLower.endsWith('.pdf')
+                  ? `${documentTitle} (PDF)`
+                  : pdfPngFormats.includes('pdf')
+                    ? `${documentTitle} (PDF)`
+                    : pdfPngFormats.includes('png')
+                      ? `${documentTitle} (PNG)`
+                      : documentTitle;
 
               resources.push({
                 path: titleWithFormat,
@@ -821,11 +910,16 @@ export class ChatOrchestrationService {
           r.path,
           pdfPngFormats,
         );
-        const titleWithFormat = pdfPngFormats.includes('pdf')
-          ? `${documentTitle} (PDF)`
-          : pdfPngFormats.includes('png')
-            ? `${documentTitle} (PNG)`
-            : documentTitle;
+        const pathLower = r.path.toLowerCase();
+        const titleWithFormat = pathLower.endsWith('.png')
+          ? `${documentTitle} (PNG)`
+          : pathLower.endsWith('.pdf')
+            ? `${documentTitle} (PDF)`
+            : pdfPngFormats.includes('pdf')
+              ? `${documentTitle} (PDF)`
+              : pdfPngFormats.includes('png')
+                ? `${documentTitle} (PNG)`
+                : documentTitle;
         allResources.push({
           path: titleWithFormat,
           formats: pdfPngFormats,
