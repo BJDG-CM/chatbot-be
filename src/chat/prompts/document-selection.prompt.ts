@@ -28,7 +28,7 @@ export function getDocumentSelectionUserPrompt(
   const { documentList, question } = params;
 
   return `
-    다음은 사용자 질문에 대한 관련 문서 목록입니다:
+    다음은 사용자 질문에 대한 후보 문서 목록입니다 (제목 + 내용 요약):
 
     ${documentList}
 
@@ -37,7 +37,7 @@ export function getDocumentSelectionUserPrompt(
     위 문서들 중에서 사용자 질문에 **실제로 도움이 되는** 문서만 선택해주세요.
 
     선택 지침:
-    - 문서 제목과 사용자 질문의 주제가 직접적으로 관련이 있어야 합니다.
+    - 문서 제목과 내용 요약을 보고, 사용자 질문의 주제와 직접적으로 관련 있는 문서를 선택하세요.
     - 질문에 답변하는 데 필요한 정보를 제공할 수 있는 문서를 선택하세요.
     - **최대 3개까지만** 선택하세요. 가장 관련성이 높은 문서만 선택하세요.
     - 관련성이 낮거나 불확실한 문서는 선택하지 마세요.

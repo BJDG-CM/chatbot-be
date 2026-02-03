@@ -14,8 +14,9 @@ import type { FastifyReply } from 'fastify';
 import {
   DOCUMENT_SELECTION_SYSTEM_PROMPT,
   getDocumentSelectionUserPrompt,
+  RESOURCE_PATH_SELECTION_SYSTEM_PROMPT,
+  getResourcePathSelectionUserPrompt,
   FINAL_RESPONSE_SYSTEM_PROMPT,
-  NO_TOOLS_AVAILABLE_SYSTEM_PROMPT,
   NO_RELEVANT_MATERIALS_SYSTEM_PROMPT,
 } from '../prompts';
 
@@ -152,9 +153,12 @@ export class ChatOrchestrationService {
     }
 
     // raw.content에서 text 타입 항목 추출
-    if (toolResult.raw.content) {
+    const raw = toolResult.raw as {
+      content?: Array<{ type: string; text?: string }>;
+    };
+    if (raw?.content) {
       const textContents: string[] = [];
-      for (const item of toolResult.raw.content) {
+      for (const item of raw.content) {
         if (item.type === 'text' && 'text' in item) {
           const text = item.text;
           // JSON 문자열이 아닌 경우 그대로 추가
@@ -176,40 +180,62 @@ export class ChatOrchestrationService {
   }
 
   /**
-   * 질문 키워드와 리소스 경로를 매칭하여 관련 리소스 찾기
+   * LLM으로 질문과 의미·맥락상 관련 있는 리소스 경로를 선별 (OpenRouter 사용)
+   * 키워드 매칭 대신 의미 기반으로 최대 maxResults개 선택합니다.
    */
-  private findRelevantResources(
+  private async selectRelevantResourcePaths(
     question: string,
     resources: Array<{ path: string; formats?: string[] }>,
-    maxResults: number = 3,
-  ): Array<{ path: string; formats?: string[] }> {
-    const keywords =
-      question
-        .toLowerCase()
-        .match(/[\uac00-\ud7a3]+|[a-z]+/gi)
-        ?.filter((word) => word.length > 1) || [];
-
-    if (keywords.length === 0) {
-      return resources.slice(0, maxResults);
+    maxResults: number = 10,
+  ): Promise<Array<{ path: string; formats?: string[] }>> {
+    if (!resources.length) {
+      return [];
     }
 
-    const scoredResources = resources.map((resource) => {
-      const pathLower = resource.path.toLowerCase();
-      let score = 0;
+    const pathList = resources.map((r, i) => `${i + 1}. ${r.path}`).join('\n');
 
-      for (const keyword of keywords) {
-        if (pathLower.includes(keyword)) {
-          score += keyword.length;
-        }
-      }
-
-      return { resource, score };
+    const userPrompt = getResourcePathSelectionUserPrompt({
+      pathList,
+      question,
+      maxSelect: maxResults,
     });
 
-    return scoredResources
-      .sort((a, b) => b.score - a.score)
-      .slice(0, maxResults)
-      .map((item) => item.resource);
+    try {
+      const response = await this.openRouterService.callLLM(
+        [
+          { role: 'system', content: RESOURCE_PATH_SELECTION_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        undefined,
+        { temperature: 0.1, max_tokens: 200 },
+      );
+
+      const selectedText = response.choices[0]?.message?.content?.trim() || '';
+      this.logger.debug(`LLM selected resource paths: ${selectedText}`);
+
+      if (selectedText.toLowerCase().includes('없음')) {
+        return [];
+      }
+
+      const numbers =
+        selectedText
+          .match(/\d+/g)
+          ?.map((n) => parseInt(n, 10) - 1)
+          .filter((n) => n >= 0 && n < resources.length) || [];
+
+      const uniqueIndices = [...new Set(numbers)].slice(0, maxResults);
+      const selected = uniqueIndices.map((idx) => resources[idx]);
+
+      this.logger.log(
+        `Selected ${selected.length} resource path(s) by LLM: ${selected.map((r) => r.path).join(', ')}`,
+      );
+      return selected;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to select resource paths by LLM: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
   }
 
   /**
@@ -332,10 +358,19 @@ export class ChatOrchestrationService {
     }
 
     try {
-      // 문서 제목만 사용하여 프롬프트 생성 (내용은 제외하여 프롬프트 길이 최소화)
+      // 제목 + 내용 앞부분(요약)을 주어 경로/제목에 키워드가 없어도 내용으로 관련 문서 선별 가능하게 함
+      const CONTENT_SNIPPET_LENGTH = 280;
       const documentList = documents
-        .map((doc, index) => `${index + 1}. ${doc.title}`)
-        .join('\n');
+        .map((doc, index) => {
+          const snippet =
+            doc.content.length > CONTENT_SNIPPET_LENGTH
+              ? doc.content
+                  .slice(0, CONTENT_SNIPPET_LENGTH)
+                  .replace(/\n/g, ' ') + '...'
+              : doc.content.replace(/\n/g, ' ');
+          return `${index + 1}. ${doc.title}\n   내용 요약: ${snippet}`;
+        })
+        .join('\n\n');
 
       const selectionPrompt = getDocumentSelectionUserPrompt({
         documentList,
@@ -429,10 +464,11 @@ export class ChatOrchestrationService {
       return { content: '', usedResources: [] };
     }
 
-    const relevantResources = this.findRelevantResources(
+    // list_resources로 불러온 전체 문서 목록을 LLM에 전달해 관련 경로 선별 (최대 10개 선택)
+    const relevantResources = await this.selectRelevantResourcePaths(
       question,
       mdResources,
-      5, // 초기 선택은 5개로 늘림 (나중에 LLM이 선별)
+      10,
     );
 
     if (relevantResources.length === 0) {
@@ -504,6 +540,7 @@ export class ChatOrchestrationService {
       })),
     );
 
+    // 관련 문서가 없으면 빈 결과 반환 → "해당하는 문서가 없습니다" 응답만 하도록 함 (일반 지식 답변·환각 방지)
     if (selectedDocuments.length === 0) {
       this.logger.log('No documents selected by LLM as relevant');
       return { content: '', usedResources: [] };
@@ -705,82 +742,18 @@ export class ChatOrchestrationService {
         content: userQuestion,
       });
 
-      // 2. MCP Tool 목록 조회 (캐시 사용)
-      const mcpTools = await this.getMcpTools();
-
-      if (mcpTools.length === 0) {
-        this.logger.warn('No MCP tools available');
-        const stream = await this.openRouterService.generateFinalResponseStream(
-          [
-            { role: 'system', content: NO_TOOLS_AVAILABLE_SYSTEM_PROMPT },
-            ...historyMessages,
-            { role: 'user', content: userQuestion },
-          ],
-          [],
-          undefined,
-          { temperature: 0 },
-        );
-        return { stream, resources: [] };
-      }
-
-      // 3. LLM에게 Tool 선택 요청 (최대 2회 시도)
-      this.logger.debug(
-        `Requesting tool selection from LLM for question: "${userQuestion}"`,
+      // 2. list_resources 직접 호출 (도구 선택 LLM 없이)
+      this.logger.debug('Calling list_resources...');
+      const listResult = await this.mcpClientService.callTool(
+        'list_resources',
+        {},
       );
 
-      let toolSelectionResponse: any;
-      let toolCalls: any[] = [];
-      const maxAttempts = 2;
-
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          toolSelectionResponse = await this.openRouterService.selectTool(
-            userQuestion,
-            mcpTools,
-            undefined,
-            attempt > 1
-              ? { temperature: 0.1, emphasizeToolUsage: true }
-              : undefined,
-            historyMessages,
-          );
-
-          toolCalls = this.openRouterService.parseToolCalls(
-            toolSelectionResponse,
-          );
-
-          this.logger.debug(
-            `Tool selection result (attempt ${attempt}/${maxAttempts}): ${toolCalls.length} tool(s) selected`,
-          );
-
-          if (toolCalls.length > 0) {
-            break; // Tool이 선택되었으면 중단
-          }
-
-          // 마지막 시도가 아니면 잠시 대기 후 재시도
-          if (attempt < maxAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          this.logger.error(
-            `Error during tool selection (attempt ${attempt}): ${errorMessage}`,
-          );
-
-          // 마지막 시도가 아니면 재시도
-          if (attempt < maxAttempts) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            continue;
-          }
-          // 마지막 시도에서도 실패하면 toolCalls는 빈 배열로 유지
-        }
-      }
-
-      // 4. Tool이 선택되지 않은 경우 (2회 시도 후 실패)
-      if (toolCalls.length === 0) {
-        this.logger.warn(
-          `No tools selected after ${maxAttempts} attempt(s). Responding that no relevant materials are available.`,
-        );
+      if (
+        !listResult.filteredResources ||
+        listResult.filteredResources.length === 0
+      ) {
+        this.logger.warn('No resources from list_resources');
         const stream = await this.openRouterService.generateFinalResponseStream(
           [
             { role: 'system', content: NO_RELEVANT_MATERIALS_SYSTEM_PROMPT },
@@ -794,59 +767,17 @@ export class ChatOrchestrationService {
         return { stream, resources: [] };
       }
 
-      // 5. Tool 실행 (병렬 처리)
-      this.logger.debug(`Executing ${toolCalls.length} tool(s) in parallel...`);
-      const toolExecutionPromises = toolCalls.map((toolCall) =>
-        this.executeToolWithTimeout(toolCall, sessionId, userQuestion).catch(
-          (error) => {
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
-            this.logger.error(
-              `Error executing tool ${toolCall.name}: ${errorMessage}`,
-            );
-            return {
-              tool_call_id: toolCall.id,
-              name: toolCall.name,
-              content: `Tool execution failed: ${errorMessage}`,
-              resources: [] as ResourceInfo[],
-              hadReferenceContent: false,
-            };
-          },
-        ),
+      // 3. 관련 리소스 내용 가져오기 (전체 문서 목록을 LLM에 넘겨 선별 후 본문 fetch)
+      const relevantResult = await this.fetchRelevantResourceContents(
+        userQuestion,
+        listResult.filteredResources,
       );
 
-      const toolExecutionResults = await Promise.all(toolExecutionPromises);
+      const hasContent =
+        typeof relevantResult.content === 'string' &&
+        relevantResult.content.trim().length > 0;
 
-      const toolResults: Array<{
-        tool_call_id: string;
-        name: string;
-        content: string;
-      }> = [];
-      const allResources: ResourceInfo[] = [];
-
-      for (const result of toolExecutionResults) {
-        toolResults.push({
-          tool_call_id: result.tool_call_id,
-          name: result.name,
-          content: result.content,
-        });
-        const resources = result.resources ?? [];
-        if (resources.length > 0) {
-          allResources.push(...resources);
-        }
-      }
-
-      // 5.5 참조 문서가 없으면 LLM에 넘기지 않고 "관련 자료 없음" 응답으로 처리
-      // (참조 문서 없을 때 모델이 학습 지식으로 답하는 것 방지. hadReferenceContent는 fetchRelevantResourceContents에서 실제로 내용을 붙였을 때만 true)
-      const anyHadReferenceContent = toolExecutionResults.some(
-        (r) => r.hadReferenceContent === true,
-      );
-      const hasReferenceContent =
-        allResources.length > 0 || anyHadReferenceContent;
-      this.logger.debug(
-        `[5.5] allRes=${allResources.length} anyHadRef=${anyHadReferenceContent} → hasRef=${hasReferenceContent}`,
-      );
-      if (!hasReferenceContent) {
+      if (!hasContent) {
         this.logger.warn('No reference documents available.');
         const stream = await this.openRouterService.generateFinalResponseStream(
           [
@@ -861,22 +792,65 @@ export class ChatOrchestrationService {
         return { stream, resources: [] };
       }
 
-      // 6. Tool 결과를 LLM에 전달하여 최종 응답 생성 (스트리밍)
+      const resultText =
+        listResult.texts.join('\n') || JSON.stringify(listResult.raw, null, 2);
+      const fullContent = resultText + '\n\n' + relevantResult.content;
+
+      const syntheticToolCallId = 'list_resources_0';
+      const toolResults: Array<{
+        tool_call_id: string;
+        name: string;
+        content: string;
+      }> = [
+        {
+          tool_call_id: syntheticToolCallId,
+          name: 'list_resources',
+          content: fullContent,
+        },
+      ];
+
+      const allResources: ResourceInfo[] = [];
+      for (const r of relevantResult.usedResources) {
+        if (!r.path || !r.formats) continue;
+        const pdfPngFormats = r.formats.filter(
+          (f) => f === 'pdf' || f === 'png',
+        );
+        if (pdfPngFormats.length === 0) continue;
+        const documentTitle = this.extractDocumentTitle(
+          r.path,
+          r.path,
+          pdfPngFormats,
+        );
+        const titleWithFormat = pdfPngFormats.includes('pdf')
+          ? `${documentTitle} (PDF)`
+          : pdfPngFormats.includes('png')
+            ? `${documentTitle} (PNG)`
+            : documentTitle;
+        allResources.push({
+          path: titleWithFormat,
+          formats: pdfPngFormats,
+          url: this.generateResourceUrl(r.path),
+        });
+      }
+
+      // 4. 최종 응답 스트리밍 (synthetic assistant tool_call + tool 메시지)
       this.logger.debug('Generating final response with tool results...');
       const messages: OpenRouterMessage[] = [
         { role: 'system', content: FINAL_RESPONSE_SYSTEM_PROMPT },
         ...historyMessages,
         { role: 'user', content: userQuestion },
-      ];
-
-      // tool_calls가 있으면 하나의 assistant 메시지에 모든 tool_calls 포함
-      if (toolSelectionResponse.choices[0]?.message.tool_calls) {
-        messages.push({
+        {
           role: 'assistant',
           content: null,
-          tool_calls: toolSelectionResponse.choices[0].message.tool_calls,
-        });
-      }
+          tool_calls: [
+            {
+              id: syntheticToolCallId,
+              type: 'function',
+              function: { name: 'list_resources', arguments: '{}' },
+            },
+          ],
+        },
+      ];
 
       const stream = await this.openRouterService.generateFinalResponseStream(
         messages,

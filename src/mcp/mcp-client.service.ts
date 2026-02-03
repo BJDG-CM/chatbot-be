@@ -171,14 +171,16 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
         try {
           const parsed = JSON.parse(text);
           if (parsed.resources && Array.isArray(parsed.resources)) {
-            const pngPdfResources = parsed.resources.filter(
+            // 경로 선별·본문 fetch용: md 포함 리소스 필요 (png/pdf만 있으면 md 전용 문서가 빠져 LLM이 선택할 문서 없음)
+            const withMdOrPdfPng = parsed.resources.filter(
               (resource: { path: string; formats: string[] }) =>
                 resource.formats &&
                 Array.isArray(resource.formats) &&
-                (resource.formats.includes('png') ||
+                (resource.formats.includes('md') ||
+                  resource.formats.includes('png') ||
                   resource.formats.includes('pdf')),
             );
-            filteredResources.push(...pngPdfResources);
+            filteredResources.push(...withMdOrPdfPng);
           } else {
             texts.push(text);
           }
@@ -263,14 +265,15 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
         try {
           const parsed = JSON.parse(item.text);
           if (parsed.resources && Array.isArray(parsed.resources)) {
-            const pngPdfResources = parsed.resources.filter(
+            const withMdOrPdfPng = parsed.resources.filter(
               (resource: { path: string; formats: string[] }) =>
                 resource.formats &&
                 Array.isArray(resource.formats) &&
-                (resource.formats.includes('png') ||
+                (resource.formats.includes('md') ||
+                  resource.formats.includes('png') ||
                   resource.formats.includes('pdf')),
             );
-            filteredResources.push(...pngPdfResources);
+            filteredResources.push(...withMdOrPdfPng);
           } else {
             texts.push(item.text);
           }
