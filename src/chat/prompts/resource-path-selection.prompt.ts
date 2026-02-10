@@ -1,7 +1,10 @@
 /**
  * 문서 경로(목록) 선별을 위한 프롬프트
- * 사용자 질문과 문서 경로/제목만 보고, 관련 있는 문서 번호를 LLM이 선택합니다.
+ * - 구 형식: 경로만 있는 플랫 리스트 → 번호로 선택
+ * - 신 형식: description + chunks → description 보고 chunk 경로 선택, JSON 배열 반환
  */
+
+import type { ListResourceItem } from '../../mcp/mcp-client.service';
 
 export interface ResourcePathSelectionPromptParams {
   pathList: string;
@@ -10,7 +13,7 @@ export interface ResourcePathSelectionPromptParams {
 }
 
 /**
- * 리소스 경로 선별 시스템 프롬프트
+ * 리소스 경로 선별 시스템 프롬프트 (구 형식: 경로만)
  */
 export const RESOURCE_PATH_SELECTION_SYSTEM_PROMPT = `
 당신은 사용자 질문과 문서 경로(제목)의 관련성을 판단하는 전문가입니다.
@@ -22,7 +25,7 @@ export const RESOURCE_PATH_SELECTION_SYSTEM_PROMPT = `
 `;
 
 /**
- * 리소스 경로 선별 사용자 프롬프트 생성
+ * 리소스 경로 선별 사용자 프롬프트 생성 (구 형식)
  */
 export function getResourcePathSelectionUserPrompt(
   params: ResourcePathSelectionPromptParams,
@@ -47,4 +50,66 @@ ${pathList}
 - 관련 있는 문서가 없으면 "없음"이라고 답변하세요.
 - 설명 없이 번호만 입력하세요.
 `;
+}
+
+/** chunk 선별용 프롬프트 파라미터 (신 형식: description + chunks) */
+export interface ChunkSelectionPromptParams {
+  question: string;
+  resourceListText: string;
+  maxSelect: number;
+}
+
+/**
+ * chunk 선별 시스템 프롬프트 (신 형식: description 보고 관련 chunk 선택)
+ */
+export const CHUNK_SELECTION_SYSTEM_PROMPT = `
+당신은 사용자 질문과 리소스 설명(description)의 관련성을 판단하는 전문가입니다.
+
+각 리소스의 description과 하위 chunk의 description을 보고, 질문에 답할 수 있는 chunk를 선택하세요.
+선택한 chunk의 path만 JSON 배열로 반환합니다. 설명이나 다른 텍스트는 포함하지 마세요.
+`;
+
+/**
+ * chunk 선별 사용자 프롬프트 생성 (신 형식)
+ */
+export function getChunkSelectionUserPrompt(
+  params: ChunkSelectionPromptParams,
+): string {
+  const { question, resourceListText, maxSelect } = params;
+
+  return `
+사용자 질문: "${question}"
+
+아래 리소스 목록에서 질문에 답할 수 있는 chunk를 최대 ${maxSelect}개 선택하세요.
+각 리소스의 description과 chunks의 description을 참고하여 판단하세요.
+
+리소스 목록:
+${resourceListText}
+
+선택한 chunk 경로만 JSON 배열로 반환하세요. 예: ["경로1", "경로2", "경로3"]
+관련 있는 chunk가 없으면 빈 배열을 반환하세요: []
+`;
+}
+
+/**
+ * 신 형식 list_resources 결과를 LLM에 넘길 텍스트로 포맷
+ */
+export function formatResourceListForChunkSelection(
+  resources: ListResourceItem[],
+): string {
+  return resources
+    .map((r, i) => {
+      const chunkLines = (r.chunks || [])
+        .map(
+          (c) =>
+            `  - path: "${c.path}", description: "${c.description || ''}"`,
+        )
+        .join('\n');
+      return `[리소스 ${i + 1}]
+path: "${r.path}"
+description: "${r.description || ''}"
+chunks:
+${chunkLines}`;
+    })
+    .join('\n\n');
 }
