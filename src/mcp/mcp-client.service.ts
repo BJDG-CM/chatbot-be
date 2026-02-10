@@ -20,13 +20,27 @@ import type {
   CallToolRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 
+/** list_resources 신 형식: 상위 리소스 (description + chunks) */
+export type ListResourceItem = {
+  path: string;
+  description: string;
+  chunks: Array<{ path: string; description: string }>;
+};
+
 /** list_resources 호출 결과 (캐시용) */
 export type ListResourcesResult = {
   raw: unknown;
   texts: string[];
   resourceLinks: unknown[];
   embeddedResources: unknown[];
+  /** 구 형식: 플랫 리스트 (경로 + formats) */
   filteredResources: Array<{ path: string; formats: string[] }>;
+  /** 신 형식: 상위 리소스 목록 (path, description, chunks) */
+  resources?: ListResourceItem[];
+  /** 신 형식: 모든 chunk 평탄화 - LLM 선별용 */
+  chunks?: Array<{ path: string; description: string }>;
+  /** 신 형식: 상위 리소스 개수 */
+  total?: number;
 };
 
 /**
@@ -156,6 +170,8 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * list_resources 응답 파싱 (캐시 저장 및 일반 호출 경로에서 공통 사용)
+   * 신 형식: { resources: [{ path, description, chunks }], total } → chunks 평탄화
+   * 구 형식: { resources: [{ path, formats }] } → filteredResources
    */
   private parseListResourcesResponse(res: {
     content: Array<{ type: string; text?: string }>;
@@ -163,7 +179,10 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
     const texts: string[] = [];
     const resourceLinks: unknown[] = [];
     const embeddedResources: unknown[] = [];
-    const filteredResources: Array<{ path: string; formats: string[] }> = [];
+    let filteredResources: Array<{ path: string; formats: string[] }> = [];
+    let resources: ListResourceItem[] | undefined;
+    let chunks: Array<{ path: string; description: string }> | undefined;
+    let total: number | undefined;
 
     for (const item of res.content) {
       if (item.type === 'text') {
@@ -171,16 +190,35 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
         try {
           const parsed = JSON.parse(text);
           if (parsed.resources && Array.isArray(parsed.resources)) {
-            // 경로 선별·본문 fetch용: md 포함 리소스 필요 (png/pdf만 있으면 md 전용 문서가 빠져 LLM이 선택할 문서 없음)
-            const withMdOrPdfPng = parsed.resources.filter(
-              (resource: { path: string; formats: string[] }) =>
-                resource.formats &&
-                Array.isArray(resource.formats) &&
-                (resource.formats.includes('md') ||
-                  resource.formats.includes('png') ||
-                  resource.formats.includes('pdf')),
-            );
-            filteredResources.push(...withMdOrPdfPng);
+            const first = parsed.resources[0];
+            const isNewFormat =
+              first &&
+              typeof first.description === 'string' &&
+              Array.isArray(first.chunks);
+
+            if (isNewFormat) {
+              resources = parsed.resources as ListResourceItem[];
+              total =
+                typeof parsed.total === 'number'
+                  ? parsed.total
+                  : resources.length;
+              chunks = resources.flatMap((r) =>
+                (r.chunks || []).map((c) => ({
+                  path: c.path,
+                  description: c.description || '',
+                })),
+              );
+            } else {
+              const withMdOrPdfPng = parsed.resources.filter(
+                (resource: { path: string; formats: string[] }) =>
+                  resource.formats &&
+                  Array.isArray(resource.formats) &&
+                  (resource.formats.includes('md') ||
+                    resource.formats.includes('png') ||
+                    resource.formats.includes('pdf')),
+              );
+              filteredResources = withMdOrPdfPng;
+            }
           } else {
             texts.push(text);
           }
@@ -205,6 +243,9 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
       resourceLinks,
       embeddedResources,
       filteredResources,
+      resources,
+      chunks,
+      total,
     };
   }
 

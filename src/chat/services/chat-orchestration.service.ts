@@ -3,6 +3,10 @@ import {
   Logger,
   InternalServerErrorException,
 } from '@nestjs/common';
+import type {
+  ListResourcesResult,
+  ListResourceItem,
+} from '../../mcp/mcp-client.service';
 import { McpClientService } from '../../mcp/mcp-client.service';
 import { OpenRouterService } from './open-router.service';
 import { ChatService } from './chat.service';
@@ -16,6 +20,9 @@ import {
   getDocumentSelectionUserPrompt,
   RESOURCE_PATH_SELECTION_SYSTEM_PROMPT,
   getResourcePathSelectionUserPrompt,
+  CHUNK_SELECTION_SYSTEM_PROMPT,
+  getChunkSelectionUserPrompt,
+  formatResourceListForChunkSelection,
   FINAL_RESPONSE_SYSTEM_PROMPT,
   NO_RELEVANT_MATERIALS_SYSTEM_PROMPT,
 } from '../prompts';
@@ -180,7 +187,63 @@ export class ChatOrchestrationService {
   }
 
   /**
-   * LLM으로 질문과 의미·맥락상 관련 있는 리소스 경로를 선별 (OpenRouter 사용)
+   * 신 형식: LLM에게 description을 보고 관련 chunk 경로 최대 maxResults개 선택 (JSON 배열 반환)
+   */
+  private async selectRelevantChunkPaths(
+    question: string,
+    resources: ListResourceItem[],
+    maxResults: number = 10,
+  ): Promise<string[]> {
+    if (!resources?.length) {
+      return [];
+    }
+
+    const resourceListText = formatResourceListForChunkSelection(resources);
+    const userPrompt = getChunkSelectionUserPrompt({
+      question,
+      resourceListText,
+      maxSelect: maxResults,
+    });
+
+    try {
+      const response = await this.openRouterService.callLLM(
+        [
+          { role: 'system', content: CHUNK_SELECTION_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        undefined,
+        { temperature: 0.1, max_tokens: 500 },
+      );
+
+      let selectedText = response.choices[0]?.message?.content?.trim() || '';
+      this.logger.debug(`LLM chunk selection raw: ${selectedText}`);
+
+      // 마크다운 코드블록 제거 (```json ... ```)
+      const codeBlockMatch = selectedText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (codeBlockMatch) {
+        selectedText = codeBlockMatch[1].trim();
+      }
+
+      const parsed = JSON.parse(selectedText) as unknown;
+      const paths = Array.isArray(parsed)
+        ? (parsed as string[]).filter(
+            (p) => typeof p === 'string' && p.length > 0,
+          )
+        : [];
+
+      const limited = paths.slice(0, maxResults);
+      this.logger.log(`[DEBUG] 1차 선별 결과(chunk 경로): ${limited.length}개`);
+      return limited;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to select chunk paths by LLM: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * LLM으로 질문과 의미·맥락상 관련 있는 리소스 경로를 선별 (OpenRouter 사용, 구 형식)
    * 키워드 매칭 대신 의미 기반으로 최대 maxResults개 선택합니다.
    */
   private async selectRelevantResourcePaths(
@@ -226,9 +289,7 @@ export class ChatOrchestrationService {
       const uniqueIndices = [...new Set(numbers)].slice(0, maxResults);
       const selected = uniqueIndices.map((idx) => resources[idx]);
 
-      this.logger.log(
-        `Selected ${selected.length} resource path(s) by LLM: ${selected.map((r) => r.path).join(', ')}`,
-      );
+      this.logger.log(`Selected ${selected.length} resource path(s) by LLM`);
       return selected;
     } catch (error) {
       this.logger.warn(
@@ -450,7 +511,7 @@ export class ChatOrchestrationService {
       const limitedNumbers = numbers.slice(0, 3);
       const selected = limitedNumbers.map((idx) => documents[idx]);
       this.logger.log(
-        `Selected ${selected.length} relevant document(s) out of ${documents.length}: ${selected.map((d) => d.title).join(', ')}`,
+        `Selected ${selected.length} relevant document(s) out of ${documents.length}`,
       );
 
       return selected;
@@ -464,24 +525,136 @@ export class ChatOrchestrationService {
   }
 
   /**
-   * list_resources tool 응답에서 관련 리소스 내용 가져오기
-   * formats 배열에 md가 있는 리소스만 가져옵니다.
-   * 리소스 내용에 하위 문서 링크가 있으면 관련 하위 문서도 추가로 가져옵니다.
-   * LLM에게 질문과 관련성이 높은 문서만 선별하도록 요청합니다.
-   * @returns 문서 내용과 실제 사용된 리소스 정보 (PDF/PNG만)
+   * 신 형식 list_resources: description 기반 chunk 선별 → get_resource(chunk_path) → 본문 수집
    */
-  private async fetchRelevantResourceContents(
+  private async fetchRelevantContentsFromChunks(
     question: string,
-    filteredResources: Array<{ path: string; formats: string[] }>,
+    resources: ListResourceItem[],
   ): Promise<{
     content: string;
     usedResources: Array<{ path: string; formats: string[] }>;
   }> {
+    this.logger.log(
+      `[DEBUG] 1차 선별(description 기준) 입력: 상위 리소스 ${resources.length}개, chunk 총 ${resources.reduce((s, r) => s + (r.chunks?.length ?? 0), 0)}개 → LLM에 전달`,
+    );
+
+    const chunkPaths = await this.selectRelevantChunkPaths(
+      question,
+      resources,
+      10,
+    );
+
+    if (chunkPaths.length === 0) {
+      return { content: '', usedResources: [] };
+    }
+
+    const documentCandidates: Array<{
+      title: string;
+      content: string;
+      path: string;
+    }> = [];
+
+    for (const chunkPath of chunkPaths) {
+      try {
+        const pathForTool = this.normalizeResourcePath(chunkPath);
+        this.logger.debug(`Fetching chunk: ${pathForTool}`);
+        const toolResult = await this.mcpClientService.callTool(
+          'get_resource',
+          { path: pathForTool },
+        );
+
+        const content = this.extractContentFromToolResult(toolResult);
+        if (content) {
+          const title = chunkPath.split('/').pop() || chunkPath || '문서';
+          documentCandidates.push({
+            title,
+            content,
+            path: chunkPath,
+          });
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Failed to fetch chunk ${chunkPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (documentCandidates.length === 0) {
+      return { content: '', usedResources: [] };
+    }
+
+    this.logger.log(
+      `[DEBUG] 2차 선별(본문 기준) 입력: 후보 문서 ${documentCandidates.length}개 → LLM에 전달`,
+    );
+
+    const selectedDocuments = await this.selectMostRelevantDocuments(
+      question,
+      documentCandidates.map((doc) => ({
+        title: doc.title,
+        content: doc.content,
+        path: doc.path,
+      })),
+    );
+
+    this.logger.log(
+      `[DEBUG] 2차 선별 결과(최종 사용 문서): ${selectedDocuments.length}개`,
+    );
+
+    if (selectedDocuments.length === 0) {
+      this.logger.log('No documents selected by LLM as relevant');
+      return { content: '', usedResources: [] };
+    }
+
+    const contents: string[] = [];
+    const usedResources: Array<{ path: string; formats: string[] }> = [];
+
+    for (const selected of selectedDocuments) {
+      const doc = documentCandidates.find((d) => d.path === selected.path);
+      if (doc) {
+        contents.push(`\n\n## 리소스: ${doc.title}\n\n${doc.content}`);
+        usedResources.push({ path: doc.path, formats: ['md'] });
+      }
+    }
+
+    const finalUsedResources = usedResources.slice(0, 3);
+
+    return {
+      content: contents.join('\n'),
+      usedResources: finalUsedResources,
+    };
+  }
+
+  /**
+   * list_resources tool 응답에서 관련 리소스 내용 가져오기
+   * - 신 형식(resources + chunks): description 보고 chunk 경로 선별 → get_resource(chunk_path)
+   * - 구 형식(filteredResources): 경로만 선별 후 get_resource
+   * @returns 문서 내용과 실제 사용된 리소스 정보 (PDF/PNG만, 신 형식은 chunk path + md)
+   */
+  private async fetchRelevantResourceContents(
+    question: string,
+    listResult: ListResourcesResult,
+  ): Promise<{
+    content: string;
+    usedResources: Array<{ path: string; formats: string[] }>;
+  }> {
+    const isNewFormat =
+      listResult.resources &&
+      listResult.resources.length > 0 &&
+      listResult.chunks &&
+      listResult.chunks.length > 0;
+
+    if (isNewFormat) {
+      return this.fetchRelevantContentsFromChunks(
+        question,
+        listResult.resources!,
+      );
+    }
+
+    const filteredResources = listResult.filteredResources;
     if (!filteredResources || filteredResources.length === 0) {
       return { content: '', usedResources: [] };
     }
 
-    // formats 배열에 md가 있는 리소스만 필터링
     const mdResources = filteredResources.filter(
       (resource) => resource.formats && resource.formats.includes('md'),
     );
@@ -491,7 +664,10 @@ export class ChatOrchestrationService {
       return { content: '', usedResources: [] };
     }
 
-    // list_resources로 불러온 전체 문서 목록을 LLM에 전달해 관련 경로 선별 (최대 10개 선택)
+    this.logger.log(
+      `[DEBUG] 1차 선별(경로 기준) 입력: MD 문서 ${mdResources.length}개 → LLM에 전달`,
+    );
+
     const relevantResources = await this.selectRelevantResourcePaths(
       question,
       mdResources,
@@ -503,10 +679,9 @@ export class ChatOrchestrationService {
     }
 
     this.logger.log(
-      `Found ${relevantResources.length} candidate markdown resource(s): ${relevantResources.map((r) => r.path).join(', ')}`,
+      `[DEBUG] 1차 선별 결과(상위 관련 문서 경로): ${relevantResources.length}개`,
     );
 
-    // 모든 후보 문서 내용 가져오기
     const documentCandidates: Array<{
       title: string;
       content: string;
@@ -517,14 +692,11 @@ export class ChatOrchestrationService {
 
     for (const resource of relevantResources) {
       try {
-        // MCP 서버는 확장자 없이 경로를 받음
         const resourcePath = this.normalizeResourcePath(resource.path);
         this.logger.debug(`Fetching markdown resource: ${resourcePath}`);
         const toolResult = await this.mcpClientService.callTool(
           'get_resource',
-          {
-            path: resourcePath,
-          },
+          { path: resourcePath },
         );
 
         const content = this.extractContentFromToolResult(toolResult);
@@ -534,8 +706,6 @@ export class ChatOrchestrationService {
             resource.path,
             resource.formats,
           );
-
-          // 리소스 내용에서 하위 문서 링크 추출
           const subDocuments = this.parseDocumentLinks(content);
 
           documentCandidates.push({
@@ -557,7 +727,10 @@ export class ChatOrchestrationService {
       return { content: '', usedResources: [] };
     }
 
-    // LLM에게 질문과 관련성이 높은 문서만 선별하도록 요청
+    this.logger.log(
+      `[DEBUG] 2차 선별(본문 기준) 입력: 후보 문서 ${documentCandidates.length}개 → LLM에 전달`,
+    );
+
     const selectedDocuments = await this.selectMostRelevantDocuments(
       question,
       documentCandidates.map((doc) => ({
@@ -567,13 +740,15 @@ export class ChatOrchestrationService {
       })),
     );
 
-    // 관련 문서가 없으면 빈 결과 반환 → "해당하는 문서가 없습니다" 응답만 하도록 함 (일반 지식 답변·환각 방지)
+    this.logger.log(
+      `[DEBUG] 2차 선별 결과(최종 사용 문서): ${selectedDocuments.length}개`,
+    );
+
     if (selectedDocuments.length === 0) {
       this.logger.log('No documents selected by LLM as relevant');
       return { content: '', usedResources: [] };
     }
 
-    // 선별된 문서만 사용
     const contents: string[] = [];
     const allSubDocuments: Array<{ path: string; description: string }> = [];
     const usedResources: Array<{ path: string; formats: string[] }> = [];
@@ -588,7 +763,6 @@ export class ChatOrchestrationService {
           `\n\n## 리소스: ${docCandidate.title}\n\n${docCandidate.content}`,
         );
 
-        // 기존: 선택된 문서 자체가 pdf/png인 경우
         const hasPdf = docCandidate.formats.includes('pdf');
         const hasPng = docCandidate.formats.includes('png');
         if (hasPdf || hasPng) {
@@ -602,14 +776,12 @@ export class ChatOrchestrationService {
           addedPaths.add(docCandidate.path);
         }
 
-        // 하위 문서도 수집
         if (docCandidate.subDocuments.length > 0) {
           allSubDocuments.push(...docCandidate.subDocuments);
         }
       }
     }
 
-    // PDF 보강: 선택된 MD의 상위 단 이름(path 첫 세그먼트)과 일치하는 PDF 수집
     for (const selected of selectedDocuments) {
       const path = selected.path;
       const firstSegment = path.split('/')[0];
@@ -624,17 +796,13 @@ export class ChatOrchestrationService {
             r.path === `${firstSegment}.pdf` ||
             r.path.startsWith(`${firstSegment}.`);
           if (match) {
-            usedResources.push({
-              path: r.path,
-              formats: ['pdf'],
-            });
+            usedResources.push({ path: r.path, formats: ['pdf'] });
             addedPaths.add(r.path);
           }
         }
       }
     }
 
-    // PNG 보강: 선택된 마크다운 내용에 ![...](이미지.png) 형태로 참조된 이미지만 수집
     for (const selected of selectedDocuments) {
       const docCandidate = documentCandidates.find(
         (d) => d.title === selected.title,
@@ -662,7 +830,6 @@ export class ChatOrchestrationService {
       }
     }
 
-    // 참고 자료 최대 3개로 제한
     const finalUsedResources = usedResources.slice(0, 3);
 
     // 하위 문서 중 질문과 관련된 문서 찾아서 추가로 가져오기
@@ -675,7 +842,7 @@ export class ChatOrchestrationService {
 
       if (relevantSubDocuments.length > 0) {
         this.logger.log(
-          `Fetching ${relevantSubDocuments.length} relevant sub-document(s): ${relevantSubDocuments.map((d) => d.path).join(', ')}`,
+          `Fetching ${relevantSubDocuments.length} relevant sub-document(s)`,
         );
         const subDocumentContents =
           await this.fetchSubDocumentContents(relevantSubDocuments);
@@ -735,15 +902,24 @@ export class ChatOrchestrationService {
         formats: string[];
       }> = [];
       let hadReferenceContent = false;
+      const listResult =
+        toolCall.name === 'list_resources'
+          ? (toolResult as ListResourcesResult)
+          : null;
+      const listHasResources =
+        listResult &&
+        ((listResult.chunks && listResult.chunks.length > 0) ||
+          (listResult.filteredResources &&
+            listResult.filteredResources.length > 0));
       if (
         toolCall.name === 'list_resources' &&
         userQuestion &&
-        toolResult.filteredResources &&
-        toolResult.filteredResources.length > 0
+        listHasResources &&
+        listResult
       ) {
         const relevantResult = await this.fetchRelevantResourceContents(
           userQuestion,
-          toolResult.filteredResources,
+          listResult,
         );
         const hasActualContent =
           typeof relevantResult.content === 'string' &&
@@ -833,15 +1009,30 @@ export class ChatOrchestrationService {
 
       // 2. list_resources 직접 호출 (도구 선택 LLM 없이)
       this.logger.debug('Calling list_resources...');
-      const listResult = await this.mcpClientService.callTool(
+      const listResult = (await this.mcpClientService.callTool(
         'list_resources',
         {},
+      )) as ListResourcesResult;
+
+      // [DEBUG] list_resources 결과: 신 형식(resources+chunks) 또는 구 형식(filteredResources)
+      const isNewFormat =
+        listResult.resources &&
+        listResult.resources.length > 0 &&
+        listResult.chunks &&
+        listResult.chunks.length > 0;
+      const totalFromList = isNewFormat
+        ? (listResult.total ?? listResult.resources?.length ?? 0)
+        : (listResult.filteredResources?.length ?? 0);
+      const chunkCount = listResult.chunks?.length ?? 0;
+      this.logger.log(
+        `[DEBUG] list_resources 결과: ${isNewFormat ? `신 형식 상위 ${listResult.resources?.length ?? 0}개, chunk ${chunkCount}개` : `구 형식 ${totalFromList}개 리소스`}`,
       );
 
-      if (
-        !listResult.filteredResources ||
-        listResult.filteredResources.length === 0
-      ) {
+      const hasResources =
+        (listResult.chunks && listResult.chunks.length > 0) ||
+        (listResult.filteredResources &&
+          listResult.filteredResources.length > 0);
+      if (!hasResources) {
         this.logger.warn('No resources from list_resources');
         const stream = await this.openRouterService.generateFinalResponseStream(
           [
@@ -856,10 +1047,10 @@ export class ChatOrchestrationService {
         return { stream, resources: [] };
       }
 
-      // 3. 관련 리소스 내용 가져오기 (전체 문서 목록을 LLM에 넘겨 선별 후 본문 fetch)
+      // 3. 관련 리소스 내용 가져오기 (신 형식: description 기반 chunk 선별 / 구 형식: 경로 선별 후 본문 fetch)
       const relevantResult = await this.fetchRelevantResourceContents(
         userQuestion,
-        listResult.filteredResources,
+        listResult,
       );
 
       const hasContent =
