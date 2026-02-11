@@ -487,7 +487,7 @@ export class ChatOrchestrationService {
       const selectedText = response.choices[0]?.message?.content?.trim() || '';
       this.logger.debug(`LLM selected documents: ${selectedText}`);
 
-      // "없음"이면 빈 배열 반환
+      // "없음"이면 빈 배열 반환 (관련 없는 질문일 수 있으므로 문서 강제 선택 안 함)
       if (selectedText.toLowerCase().includes('없음')) {
         return [];
       }
@@ -500,15 +500,15 @@ export class ChatOrchestrationService {
           .filter((n) => n >= 0 && n < documents.length) || [];
 
       if (numbers.length === 0) {
-        // 번호를 파싱할 수 없으면 모든 문서 반환 (최대 3개)
+        // 번호를 파싱할 수 없으면 앞쪽 문서 반환 (최대 5개)
         this.logger.warn(
-          `Could not parse document selection, returning first 3 documents`,
+          `Could not parse document selection, returning first 5 documents`,
         );
-        return documents.slice(0, 3);
+        return documents.slice(0, 5);
       }
 
-      // 최대 3개로 제한
-      const limitedNumbers = numbers.slice(0, 3);
+      // 최대 5개로 제한 (중요 문서 놓치지 않도록)
+      const limitedNumbers = numbers.slice(0, 5);
       const selected = limitedNumbers.map((idx) => documents[idx]);
       this.logger.log(
         `Selected ${selected.length} relevant document(s) out of ${documents.length}`,
@@ -616,7 +616,7 @@ export class ChatOrchestrationService {
       }
     }
 
-    const finalUsedResources = usedResources.slice(0, 3);
+    const finalUsedResources = usedResources.slice(0, 5);
 
     return {
       content: contents.join('\n'),
@@ -830,7 +830,7 @@ export class ChatOrchestrationService {
       }
     }
 
-    const finalUsedResources = usedResources.slice(0, 3);
+    const finalUsedResources = usedResources.slice(0, 5);
 
     // 하위 문서 중 질문과 관련된 문서 찾아서 추가로 가져오기
     if (allSubDocuments.length > 0) {
