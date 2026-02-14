@@ -334,7 +334,8 @@ export class AdminController {
   @Get('widget-keys/:widgetKeyId/collaborators')
   @ApiOperation({
     summary: '협업자 목록 조회',
-    description: '해당 위젯 키에 초대된 협업자 목록을 조회합니다. 소유자만 가능합니다.',
+    description:
+      '해당 위젯 키에 초대된 협업자 목록을 조회합니다. 소유자만 가능합니다.',
   })
   @ApiParam({
     name: 'widgetKeyId',
