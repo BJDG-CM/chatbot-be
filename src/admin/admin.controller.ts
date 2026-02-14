@@ -355,11 +355,11 @@ export class AdminController {
     return this.adminService.getCollaborators(widgetKeyId, admin.uuid);
   }
 
-  @Delete('widget-keys/:widgetKeyId/collaborators/:inviteeEmail')
+  @Delete('widget-keys/:widgetKeyId/collaborators/:inviteeId')
   @ApiOperation({
     summary: '협업자 제거',
     description:
-      '초대된 협업자를 제거합니다. 이메일 경로에는 URL 인코딩이 필요합니다 (예: user%40example.com).',
+      '초대된 협업자를 제거합니다. inviteeId는 GET /collaborators 목록에서 조회한 협업자 ID(UUID)를 사용합니다.',
   })
   @ApiParam({
     name: 'widgetKeyId',
@@ -367,10 +367,10 @@ export class AdminController {
     type: String,
   })
   @ApiParam({
-    name: 'inviteeEmail',
-    description: '제거할 협업자 이메일 (URL 인코딩 필요)',
+    name: 'inviteeId',
+    description: '제거할 협업자 레코드 ID (UUID, GET /collaborators에서 반환)',
     type: String,
-    example: 'user%40gistory.me',
+    example: '550e8400-e29b-41d4-a716-446655440000',
   })
   @ApiResponse({ status: 200, description: '제거 성공' })
   @ApiResponse({ status: 403, description: '권한 없음 (소유자만)' })
@@ -378,11 +378,11 @@ export class AdminController {
   async removeCollaborator(
     @CurrentAdmin() admin: AdminContext,
     @Param('widgetKeyId') widgetKeyId: string,
-    @Param('inviteeEmail') inviteeEmail: string,
+    @Param('inviteeId') inviteeId: string,
   ): Promise<{ message: string }> {
     await this.adminService.removeCollaborator(
       widgetKeyId,
-      inviteeEmail,
+      inviteeId,
       admin.uuid,
     );
     return { message: 'Collaborator removed successfully' };

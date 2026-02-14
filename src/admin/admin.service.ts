@@ -427,7 +427,7 @@ export class AdminService {
 
   async removeCollaborator(
     widgetKeyId: string,
-    inviteeEmail: string,
+    inviteeId: string,
     adminUuid: string,
   ): Promise<void> {
     const [key] = await this.db
@@ -445,14 +445,13 @@ export class AdminService {
       );
     }
 
-    const normalizedEmail = inviteeEmail.toLowerCase().trim();
     const [collaborator] = await this.db
       .select()
       .from(widgetKeyCollaborators)
       .where(
         and(
+          eq(widgetKeyCollaborators.id, inviteeId),
           eq(widgetKeyCollaborators.widgetKeyId, widgetKeyId),
-          eq(widgetKeyCollaborators.inviteeEmail, normalizedEmail),
         ),
       )
       .limit(1);
@@ -463,6 +462,6 @@ export class AdminService {
 
     await this.db
       .delete(widgetKeyCollaborators)
-      .where(eq(widgetKeyCollaborators.id, collaborator.id));
+      .where(eq(widgetKeyCollaborators.id, inviteeId));
   }
 }
