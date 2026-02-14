@@ -328,6 +328,7 @@ export class AdminService {
     const [key] = await this.db
       .select({
         id: widgetKeys.id,
+        status: widgetKeys.status,
         createdByIdpUuid: widgetKeys.createdByIdpUuid,
       })
       .from(widgetKeys)
@@ -340,6 +341,11 @@ export class AdminService {
     if (key.createdByIdpUuid !== adminUuid) {
       throw new ForbiddenException(
         'You do not have permission to invite collaborators to this widget key',
+      );
+    }
+    if (key.status === 'REVOKED') {
+      throw new ForbiddenException(
+        'Cannot invite collaborators to a revoked widget key',
       );
     }
 
@@ -397,7 +403,10 @@ export class AdminService {
     adminUuid: string,
   ): Promise<CollaboratorDto[]> {
     const [key] = await this.db
-      .select({ createdByIdpUuid: widgetKeys.createdByIdpUuid })
+      .select({
+        status: widgetKeys.status,
+        createdByIdpUuid: widgetKeys.createdByIdpUuid,
+      })
       .from(widgetKeys)
       .where(eq(widgetKeys.id, widgetKeyId))
       .limit(1);
@@ -408,6 +417,11 @@ export class AdminService {
     if (key.createdByIdpUuid !== adminUuid) {
       throw new ForbiddenException(
         'You do not have permission to view collaborators of this widget key',
+      );
+    }
+    if (key.status === 'REVOKED') {
+      throw new ForbiddenException(
+        'Cannot view collaborators of a revoked widget key',
       );
     }
 
@@ -431,7 +445,10 @@ export class AdminService {
     adminUuid: string,
   ): Promise<void> {
     const [key] = await this.db
-      .select({ createdByIdpUuid: widgetKeys.createdByIdpUuid })
+      .select({
+        status: widgetKeys.status,
+        createdByIdpUuid: widgetKeys.createdByIdpUuid,
+      })
       .from(widgetKeys)
       .where(eq(widgetKeys.id, widgetKeyId))
       .limit(1);
@@ -442,6 +459,11 @@ export class AdminService {
     if (key.createdByIdpUuid !== adminUuid) {
       throw new ForbiddenException(
         'You do not have permission to remove collaborators from this widget key',
+      );
+    }
+    if (key.status === 'REVOKED') {
+      throw new ForbiddenException(
+        'Cannot remove collaborators from a revoked widget key',
       );
     }
 
