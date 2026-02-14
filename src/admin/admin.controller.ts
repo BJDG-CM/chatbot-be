@@ -8,6 +8,8 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -22,7 +24,9 @@ import { UsageService } from '../usage/usage.service';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { CreateWidgetKeyDto } from '../common/dto/create-widget-key.dto';
 import { RegisterDomainsDto } from '../common/dto/register-domains.dto';
+import { InviteCollaboratorDto } from '../common/dto/invite-collaborator.dto';
 import { WidgetKeyDto } from '../common/dto/widget-key.dto';
+import { CollaboratorDto } from '../common/dto/collaborator.dto';
 import { WidgetKeyStatsDto } from '../common/dto/widget-key-usage.dto';
 import { CurrentAdmin } from '../auth/decorators/current-admin.decorator';
 import { AdminContext } from '../auth/context/admin-context.entity';
@@ -292,5 +296,95 @@ export class AdminController {
     @Param('widgetKeyId') widgetKeyId: string,
   ): Promise<WidgetKeyDto> {
     return this.adminService.revokeWidgetKey(widgetKeyId, admin.uuid);
+  }
+
+  @Post('widget-keys/:widgetKeyId/collaborators')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: '협업자 초대',
+    description:
+      '이메일로 위젯 키 사용량 조회 권한을 공유합니다. 초대 대상이 이미 Admin이면 즉시 ACCEPTED됩니다.',
+  })
+  @ApiParam({
+    name: 'widgetKeyId',
+    description: '협업자를 초대할 위젯 키의 UUID',
+    type: String,
+  })
+  @ApiResponse({
+    status: 201,
+    description: '초대 성공',
+    type: CollaboratorDto,
+  })
+  @ApiResponse({ status: 400, description: '자기 자신 초대 불가, 중복 초대' })
+  @ApiResponse({ status: 403, description: '권한 없음 (소유자만)' })
+  @ApiResponse({ status: 404, description: '존재하지 않는 Key ID' })
+  async inviteCollaborator(
+    @CurrentAdmin() admin: AdminContext,
+    @Param('widgetKeyId') widgetKeyId: string,
+    @Body() dto: InviteCollaboratorDto,
+  ): Promise<CollaboratorDto> {
+    return this.adminService.inviteCollaborator(
+      widgetKeyId,
+      dto,
+      admin.uuid,
+      admin.email,
+    );
+  }
+
+  @Get('widget-keys/:widgetKeyId/collaborators')
+  @ApiOperation({
+    summary: '협업자 목록 조회',
+    description: '해당 위젯 키에 초대된 협업자 목록을 조회합니다. 소유자만 가능합니다.',
+  })
+  @ApiParam({
+    name: 'widgetKeyId',
+    description: '협업자 목록을 조회할 위젯 키의 UUID',
+    type: String,
+  })
+  @ApiResponse({
+    status: 200,
+    description: '성공',
+    type: [CollaboratorDto],
+  })
+  @ApiResponse({ status: 403, description: '권한 없음 (소유자만)' })
+  @ApiResponse({ status: 404, description: '존재하지 않는 Key ID' })
+  async getCollaborators(
+    @CurrentAdmin() admin: AdminContext,
+    @Param('widgetKeyId') widgetKeyId: string,
+  ): Promise<CollaboratorDto[]> {
+    return this.adminService.getCollaborators(widgetKeyId, admin.uuid);
+  }
+
+  @Delete('widget-keys/:widgetKeyId/collaborators/:inviteeEmail')
+  @ApiOperation({
+    summary: '협업자 제거',
+    description:
+      '초대된 협업자를 제거합니다. 이메일 경로에는 URL 인코딩이 필요합니다 (예: user%40example.com).',
+  })
+  @ApiParam({
+    name: 'widgetKeyId',
+    description: '협업자를 제거할 위젯 키의 UUID',
+    type: String,
+  })
+  @ApiParam({
+    name: 'inviteeEmail',
+    description: '제거할 협업자 이메일 (URL 인코딩 필요)',
+    type: String,
+    example: 'user%40gistory.me',
+  })
+  @ApiResponse({ status: 200, description: '제거 성공' })
+  @ApiResponse({ status: 403, description: '권한 없음 (소유자만)' })
+  @ApiResponse({ status: 404, description: '존재하지 않는 Key ID 또는 협업자' })
+  async removeCollaborator(
+    @CurrentAdmin() admin: AdminContext,
+    @Param('widgetKeyId') widgetKeyId: string,
+    @Param('inviteeEmail') inviteeEmail: string,
+  ): Promise<{ message: string }> {
+    await this.adminService.removeCollaborator(
+      widgetKeyId,
+      inviteeEmail,
+      admin.uuid,
+    );
+    return { message: 'Collaborator removed successfully' };
   }
 }

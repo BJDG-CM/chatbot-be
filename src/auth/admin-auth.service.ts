@@ -11,9 +11,10 @@ import {
   InfoteamIdpService,
   AuthorizationCodeResponse,
 } from '@lib/infoteam-idp';
-import { DB_CONNECTION, admins } from '../db';
+import { DB_CONNECTION, admins, widgetKeyCollaborators } from '../db';
 import type { Database } from '../db';
 import type { Admin } from '../db';
+import { and, eq } from 'drizzle-orm';
 
 export interface LoginResult {
   accessToken: string;
@@ -108,7 +109,10 @@ export class AdminAuthService {
       userInfo.name,
     );
 
-    // 4. 자체 JWT 토큰 생성
+    // 4. PENDING 협업자 초대 자동 수락 (해당 이메일로 초대된 건)
+    await this.acceptPendingCollaboratorInvites(userInfo.email, userInfo.uuid);
+
+    // 5. 자체 JWT 토큰 생성
     const payload: AdminAccessTokenJwtPayload = {
       email: userInfo.email,
       uuid: userInfo.uuid,
@@ -149,7 +153,10 @@ export class AdminAuthService {
       userInfo.name,
     );
 
-    // 4. 자체 JWT 토큰 생성
+    // 4. PENDING 협업자 초대 자동 수락
+    await this.acceptPendingCollaboratorInvites(userInfo.email, userInfo.uuid);
+
+    // 5. 자체 JWT 토큰 생성
     const payload: AdminAccessTokenJwtPayload = {
       email: userInfo.email,
       uuid: userInfo.uuid,
@@ -201,6 +208,36 @@ export class AdminAuthService {
     // PII 최소화: email 대신 idpUuid 로깅
     this.logger.log(`Admin login processed: ${idpUuid}`);
     return admin;
+  }
+
+  /**
+   * 해당 이메일로 초대된 PENDING 협업자 초대를 ACCEPTED로 변경
+   */
+  private async acceptPendingCollaboratorInvites(
+    email: string,
+    idpUuid: string,
+  ): Promise<void> {
+    const normalizedEmail = email.toLowerCase().trim();
+    const result = await this.db
+      .update(widgetKeyCollaborators)
+      .set({
+        status: 'ACCEPTED',
+        inviteeIdpUuid: idpUuid,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(widgetKeyCollaborators.inviteeEmail, normalizedEmail),
+          eq(widgetKeyCollaborators.status, 'PENDING'),
+        ),
+      )
+      .returning({ id: widgetKeyCollaborators.id });
+
+    if (result.length > 0) {
+      this.logger.log(
+        `Accepted ${result.length} pending collaborator invite(s) for ${idpUuid}`,
+      );
+    }
   }
 
   /**

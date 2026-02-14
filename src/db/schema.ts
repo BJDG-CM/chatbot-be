@@ -24,6 +24,13 @@ export const messageRoleEnum = pgEnum('message_role', ['user', 'assistant']);
 
 export const adminRoleEnum = pgEnum('admin_role', ['SUPER_ADMIN', 'ADMIN']);
 
+export const collaboratorRoleEnum = pgEnum('collaborator_role', ['VIEWER']);
+
+export const collaboratorStatusEnum = pgEnum('collaborator_status', [
+  'PENDING',
+  'ACCEPTED',
+]);
+
 // Tables
 
 /**
@@ -72,6 +79,43 @@ export const widgetKeys = pgTable(
     createdByIdpUuidIdx: index('widget_keys_created_by_idp_uuid_idx').on(
       table.createdByIdpUuid,
     ),
+  }),
+);
+
+/**
+ * 위젯 키 협업자 테이블
+ * - 이메일 기반으로 위젯 키 사용량 조회 권한 공유
+ */
+export const widgetKeyCollaborators = pgTable(
+  'widget_key_collaborators',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    widgetKeyId: uuid('widget_key_id')
+      .notNull()
+      .references(() => widgetKeys.id, { onDelete: 'cascade' }),
+    inviteeEmail: varchar('invitee_email', { length: 255 }).notNull(),
+    inviteeIdpUuid: varchar('invitee_idp_uuid', { length: 255 }),
+    role: collaboratorRoleEnum('role').notNull().default('VIEWER'),
+    status: collaboratorStatusEnum('status').notNull().default('PENDING'),
+    invitedByIdpUuid: varchar('invited_by_idp_uuid', {
+      length: 255,
+    }).notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    widgetKeyIdIdx: index('widget_key_collaborators_widget_key_id_idx').on(
+      table.widgetKeyId,
+    ),
+    inviteeEmailIdx: index('widget_key_collaborators_invitee_email_idx').on(
+      table.inviteeEmail,
+    ),
+    inviteeIdpUuidIdx: index(
+      'widget_key_collaborators_invitee_idp_uuid_idx',
+    ).on(table.inviteeIdpUuid),
+    uniqueWidgetKeyInvitee: uniqueIndex(
+      'widget_key_collaborators_widget_key_id_invitee_email_unique',
+    ).on(table.widgetKeyId, table.inviteeEmail),
   }),
 );
 
@@ -191,7 +235,18 @@ export const usageDaily = pgTable(
 export const widgetKeysRelations = relations(widgetKeys, ({ many }) => ({
   sessions: many(sessions),
   usageDaily: many(usageDaily),
+  collaborators: many(widgetKeyCollaborators),
 }));
+
+export const widgetKeyCollaboratorsRelations = relations(
+  widgetKeyCollaborators,
+  ({ one }) => ({
+    widgetKey: one(widgetKeys, {
+      fields: [widgetKeyCollaborators.widgetKeyId],
+      references: [widgetKeys.id],
+    }),
+  }),
+);
 
 export const sessionsRelations = relations(sessions, ({ one, many }) => ({
   widgetKey: one(widgetKeys, {
@@ -224,6 +279,10 @@ export type NewUploadedResource = typeof uploadedResources.$inferInsert;
 
 export type WidgetKey = typeof widgetKeys.$inferSelect;
 export type NewWidgetKey = typeof widgetKeys.$inferInsert;
+
+export type WidgetKeyCollaborator = typeof widgetKeyCollaborators.$inferSelect;
+export type NewWidgetKeyCollaborator =
+  typeof widgetKeyCollaborators.$inferInsert;
 
 export type Session = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
