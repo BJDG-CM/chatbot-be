@@ -5,12 +5,20 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
-import { DB_CONNECTION, type Database, widgetKeys } from '../db';
+import {
+  DB_CONNECTION,
+  type Database,
+  widgetKeys,
+  widgetKeyCollaborators,
+  admins,
+} from '../db';
 import { and, eq, ne } from 'drizzle-orm';
 import { generateWidgetKey } from '../common/utils/widget-key-generator.util';
 import { CreateWidgetKeyDto } from '../common/dto/create-widget-key.dto';
 import { RegisterDomainsDto } from '../common/dto/register-domains.dto';
+import { InviteCollaboratorDto } from '../common/dto/invite-collaborator.dto';
 import { WidgetKeyDto, WidgetKeyStatus } from '../common/dto/widget-key.dto';
+import { CollaboratorDto } from '../common/dto/collaborator.dto';
 
 @Injectable()
 export class AdminService {
@@ -43,7 +51,8 @@ export class AdminService {
   }
 
   async getAllWidgetKeys(adminUuid: string): Promise<WidgetKeyDto[]> {
-    const keys = await this.db
+    // 소유 키
+    const ownedKeys = await this.db
       .select()
       .from(widgetKeys)
       .where(
@@ -53,14 +62,55 @@ export class AdminService {
         ),
       );
 
-    return keys.map((key) => ({
-      id: key.id,
-      name: key.name,
-      secretKey: key.secretKey,
-      status: key.status as WidgetKeyStatus,
-      allowedDomains: key.allowedDomains,
-      createdAt: key.createdAt,
-    }));
+    // 협업자로 접근 가능한 키 (ACCEPTED, invitee_idp_uuid 매칭)
+    const sharedKeys = await this.db
+      .select({
+        id: widgetKeys.id,
+        name: widgetKeys.name,
+        secretKey: widgetKeys.secretKey,
+        status: widgetKeys.status,
+        allowedDomains: widgetKeys.allowedDomains,
+        createdAt: widgetKeys.createdAt,
+      })
+      .from(widgetKeyCollaborators)
+      .innerJoin(
+        widgetKeys,
+        eq(widgetKeyCollaborators.widgetKeyId, widgetKeys.id),
+      )
+      .where(
+        and(
+          eq(widgetKeyCollaborators.inviteeIdpUuid, adminUuid),
+          eq(widgetKeyCollaborators.status, 'ACCEPTED'),
+          ne(widgetKeys.status, 'REVOKED'),
+        ),
+      );
+
+    const result: WidgetKeyDto[] = [
+      ...ownedKeys.map((key) => ({
+        id: key.id,
+        name: key.name,
+        secretKey: key.secretKey,
+        status: key.status as WidgetKeyStatus,
+        allowedDomains: key.allowedDomains,
+        createdAt: key.createdAt,
+      })),
+      ...sharedKeys.map((key) => ({
+        id: key.id,
+        name: key.name,
+        secretKey: '***', // 협업자(VIEWER)는 실제 키 노출 안 함
+        status: key.status as WidgetKeyStatus,
+        allowedDomains: key.allowedDomains,
+        createdAt: key.createdAt,
+      })),
+    ];
+
+    // id 기준 중복 제거 (소유자이면서 협업자인 경우 소유자 데이터 우선)
+    const seen = new Set<string>();
+    return result.filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
   }
 
   async createWidgetKey(
@@ -267,5 +317,173 @@ export class AdminService {
       allowedDomains: updatedKey.allowedDomains,
       createdAt: updatedKey.createdAt,
     };
+  }
+
+  async inviteCollaborator(
+    widgetKeyId: string,
+    dto: InviteCollaboratorDto,
+    adminUuid: string,
+    adminEmail: string,
+  ): Promise<CollaboratorDto> {
+    const [key] = await this.db
+      .select({
+        id: widgetKeys.id,
+        status: widgetKeys.status,
+        createdByIdpUuid: widgetKeys.createdByIdpUuid,
+      })
+      .from(widgetKeys)
+      .where(eq(widgetKeys.id, widgetKeyId))
+      .limit(1);
+
+    if (!key) {
+      throw new NotFoundException('Widget key not found');
+    }
+    if (key.createdByIdpUuid !== adminUuid) {
+      throw new ForbiddenException(
+        'You do not have permission to invite collaborators to this widget key',
+      );
+    }
+    if (key.status === 'REVOKED') {
+      throw new ForbiddenException(
+        'Cannot invite collaborators to a revoked widget key',
+      );
+    }
+
+    const normalizedEmail = dto.inviteeEmail.toLowerCase().trim();
+    if (normalizedEmail === adminEmail.toLowerCase().trim()) {
+      throw new BadRequestException('Cannot invite yourself');
+    }
+
+    const [existing] = await this.db
+      .select()
+      .from(widgetKeyCollaborators)
+      .where(
+        and(
+          eq(widgetKeyCollaborators.widgetKeyId, widgetKeyId),
+          eq(widgetKeyCollaborators.inviteeEmail, normalizedEmail),
+        ),
+      )
+      .limit(1);
+
+    if (existing) {
+      throw new BadRequestException(
+        'This email has already been invited to this widget key',
+      );
+    }
+
+    // 기존 Admin이면 즉시 ACCEPTED + invitee_idp_uuid 설정
+    const [inviteeAdmin] = await this.db
+      .select({ idpUuid: admins.idpUuid })
+      .from(admins)
+      .where(eq(admins.email, normalizedEmail))
+      .limit(1);
+
+    const [collaborator] = await this.db
+      .insert(widgetKeyCollaborators)
+      .values({
+        widgetKeyId,
+        inviteeEmail: normalizedEmail,
+        inviteeIdpUuid: inviteeAdmin?.idpUuid ?? null,
+        status: inviteeAdmin ? 'ACCEPTED' : 'PENDING',
+        invitedByIdpUuid: adminUuid,
+      })
+      .returning();
+
+    return {
+      id: collaborator.id,
+      inviteeEmail: collaborator.inviteeEmail,
+      role: collaborator.role,
+      status: collaborator.status,
+      createdAt: collaborator.createdAt,
+    };
+  }
+
+  async getCollaborators(
+    widgetKeyId: string,
+    adminUuid: string,
+  ): Promise<CollaboratorDto[]> {
+    const [key] = await this.db
+      .select({
+        status: widgetKeys.status,
+        createdByIdpUuid: widgetKeys.createdByIdpUuid,
+      })
+      .from(widgetKeys)
+      .where(eq(widgetKeys.id, widgetKeyId))
+      .limit(1);
+
+    if (!key) {
+      throw new NotFoundException('Widget key not found');
+    }
+    if (key.createdByIdpUuid !== adminUuid) {
+      throw new ForbiddenException(
+        'You do not have permission to view collaborators of this widget key',
+      );
+    }
+    if (key.status === 'REVOKED') {
+      throw new ForbiddenException(
+        'Cannot view collaborators of a revoked widget key',
+      );
+    }
+
+    const rows = await this.db
+      .select()
+      .from(widgetKeyCollaborators)
+      .where(eq(widgetKeyCollaborators.widgetKeyId, widgetKeyId));
+
+    return rows.map((r) => ({
+      id: r.id,
+      inviteeEmail: r.inviteeEmail,
+      role: r.role,
+      status: r.status,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  async removeCollaborator(
+    widgetKeyId: string,
+    inviteeId: string,
+    adminUuid: string,
+  ): Promise<void> {
+    const [key] = await this.db
+      .select({
+        status: widgetKeys.status,
+        createdByIdpUuid: widgetKeys.createdByIdpUuid,
+      })
+      .from(widgetKeys)
+      .where(eq(widgetKeys.id, widgetKeyId))
+      .limit(1);
+
+    if (!key) {
+      throw new NotFoundException('Widget key not found');
+    }
+    if (key.createdByIdpUuid !== adminUuid) {
+      throw new ForbiddenException(
+        'You do not have permission to remove collaborators from this widget key',
+      );
+    }
+    if (key.status === 'REVOKED') {
+      throw new ForbiddenException(
+        'Cannot remove collaborators from a revoked widget key',
+      );
+    }
+
+    const [collaborator] = await this.db
+      .select()
+      .from(widgetKeyCollaborators)
+      .where(
+        and(
+          eq(widgetKeyCollaborators.id, inviteeId),
+          eq(widgetKeyCollaborators.widgetKeyId, widgetKeyId),
+        ),
+      )
+      .limit(1);
+
+    if (!collaborator) {
+      throw new NotFoundException('Collaborator not found');
+    }
+
+    await this.db
+      .delete(widgetKeyCollaborators)
+      .where(eq(widgetKeyCollaborators.id, inviteeId));
   }
 }

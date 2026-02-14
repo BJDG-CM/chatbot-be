@@ -5,6 +5,7 @@ import {
   sessions,
   usageDaily,
   widgetKeys,
+  widgetKeyCollaborators,
 } from '../db';
 import { eq, sql, and, inArray, gte, lte, ne } from 'drizzle-orm';
 import { extractDomain } from '../common/utils/domain-validator.util';
@@ -89,7 +90,7 @@ export class UsageService {
   }
 
   /**
-   * Admin 소유 위젯 키별 사용량 통계 조회 (usage_daily만 사용, messages 미사용)
+   * Admin 소유 또는 협업자로 접근 가능한 위젯 키별 사용량 통계 조회
    */
   async getWidgetKeyStats(
     adminUuid: string,
@@ -102,11 +103,51 @@ export class UsageService {
     const startStr = start.toISOString().slice(0, 10);
     const endStr = end.toISOString().slice(0, 10);
 
-    const keyConditions = [
-      eq(widgetKeys.createdByIdpUuid, adminUuid),
-      ne(widgetKeys.status, 'REVOKED'),
+    // 소유 키 ID 목록
+    const ownedKeys = await this.db
+      .select({ id: widgetKeys.id })
+      .from(widgetKeys)
+      .where(
+        and(
+          eq(widgetKeys.createdByIdpUuid, adminUuid),
+          ne(widgetKeys.status, 'REVOKED'),
+        ),
+      );
+
+    // 협업자로 접근 가능한 키 ID 목록 (ACCEPTED, invitee_idp_uuid 매칭)
+    const sharedKeyRows = await this.db
+      .select({
+        widgetKeyId: widgetKeyCollaborators.widgetKeyId,
+      })
+      .from(widgetKeyCollaborators)
+      .innerJoin(
+        widgetKeys,
+        eq(widgetKeyCollaborators.widgetKeyId, widgetKeys.id),
+      )
+      .where(
+        and(
+          eq(widgetKeyCollaborators.inviteeIdpUuid, adminUuid),
+          eq(widgetKeyCollaborators.status, 'ACCEPTED'),
+          ne(widgetKeys.status, 'REVOKED'),
+        ),
+      );
+
+    const accessibleKeyIds = [
+      ...new Set([
+        ...ownedKeys.map((k) => k.id),
+        ...sharedKeyRows.map((r) => r.widgetKeyId),
+      ]),
     ];
+
+    if (accessibleKeyIds.length === 0) {
+      return [];
+    }
+
+    const keyConditions = [inArray(widgetKeys.id, accessibleKeyIds)];
     if (options.widgetKeyId) {
+      if (!accessibleKeyIds.includes(options.widgetKeyId)) {
+        return [];
+      }
       keyConditions.push(eq(widgetKeys.id, options.widgetKeyId));
     }
 
