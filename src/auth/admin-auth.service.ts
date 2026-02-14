@@ -109,8 +109,18 @@ export class AdminAuthService {
       userInfo.name,
     );
 
-    // 4. PENDING 협업자 초대 자동 수락 (해당 이메일로 초대된 건)
-    await this.acceptPendingCollaboratorInvites(userInfo.email, userInfo.uuid);
+    // 4. PENDING 협업자 초대 자동 수락 (해당 이메일로 초대된 건) - non-critical
+    try {
+      await this.acceptPendingCollaboratorInvites(
+        userInfo.email,
+        userInfo.uuid,
+      );
+    } catch (e) {
+      this.logger.error(
+        `Failed to accept pending collaborator invites: ${e instanceof Error ? e.message : String(e)}`,
+        e instanceof Error ? e.stack : String(e),
+      );
+    }
 
     // 5. 자체 JWT 토큰 생성
     const payload: AdminAccessTokenJwtPayload = {
@@ -153,8 +163,18 @@ export class AdminAuthService {
       userInfo.name,
     );
 
-    // 4. PENDING 협업자 초대 자동 수락
-    await this.acceptPendingCollaboratorInvites(userInfo.email, userInfo.uuid);
+    // 4. PENDING 협업자 초대 자동 수락 - non-critical
+    try {
+      await this.acceptPendingCollaboratorInvites(
+        userInfo.email,
+        userInfo.uuid,
+      );
+    } catch (e) {
+      this.logger.error(
+        `Failed to accept pending collaborator invites: ${e instanceof Error ? e.message : String(e)}`,
+        e instanceof Error ? e.stack : String(e),
+      );
+    }
 
     // 5. 자체 JWT 토큰 생성
     const payload: AdminAccessTokenJwtPayload = {
