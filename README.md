@@ -68,7 +68,7 @@ JWT_SECRET=your-secret-key-here-change-in-production-min-32-chars
 JWT_EXPIRES_IN=3600
 
 # Infoteam IDP Configuration (Admin 인증용)
-IDP_URL=https://idp.infoteam.kr
+IDP_URL=https://api.account.gistory.me
 IDP_CLIENT_ID=your_client_id
 IDP_CLIENT_SECRET=your_client_secret
 
@@ -77,12 +77,14 @@ IDP_CLIENT_SECRET=your_client_secret
 ```
 
 **안전한 시크릿 생성 방법:**
+
 ```bash
 # JWT Secret 생성 (최소 32자)
 openssl rand -base64 32
 ```
 
 **Admin 인증 변경사항:**
+
 - 기존의 `ADMIN_BEARER_TOKEN` 방식에서 **Infoteam IDP OAuth 2.0** 인증으로 변경되었습니다.
 - Admin API 접근 시 `@gistory.me` 이메일로 IDP 인증이 필요합니다.
 - 자세한 마이그레이션 가이드는 [ADMIN_IDP_MIGRATION.md](./ADMIN_IDP_MIGRATION.md)를 참고하세요.
@@ -112,6 +114,7 @@ $ bun run db:studio
 ### Docker 환경
 
 **Docker는 로컬의 `.env` 파일을 자동으로 읽습니다.**
+
 - `DB_HOST`는 자동으로 `postgres`로 오버라이드 (Docker 네트워크용)
 - `NODE_ENV`는 자동으로 `production`으로 오버라이드
 - 나머지 값들은 `.env` 파일에서 그대로 사용됩니다
@@ -162,6 +165,7 @@ $ bun run db:migrate
 ```
 
 **중요 사항:**
+
 - 모든 마이그레이션 파일은 **idempotent**하게 작성되어 있어 여러 번 실행해도 안전합니다.
 - ENUM 타입, 테이블, 인덱스, 제약조건은 이미 존재하면 자동으로 건너뜁니다.
 - 서버의 데이터베이스가 로컬 개발 환경과 동일한 구조로 동기화됩니다.
@@ -196,19 +200,23 @@ $ docker run -p 3000:3000 --env-file .env ziggle-chatbot-be
 ```
 
 서버 실행 후 다음 URL에서 확인할 수 있습니다:
+
 - **API**: http://localhost:3000
 - **Swagger 문서**: http://localhost:3000/api/docs
 
 ## API 엔드포인트
 
 ### 1. Widget Auth (Public)
+
 - `POST /api/v1/widget/auth/session` - 위젯 세션 토큰 발급
 
 ### 2. Widget Messages (Public, 인증 필요)
+
 - `GET /api/v1/widget/messages` - 대화 내역 조회 (커서 기반 페이징)
 - `POST /api/v1/widget/messages` - 대화 메시지 저장
 
 ### 3. Admin Management (Private, IDP 인증 필요)
+
 - `GET /api/v1/admin/widget-keys` - 위젯 키 목록 조회
 - `POST /api/v1/admin/widget-keys` - 위젯 키 생성
 - `PATCH /api/v1/admin/widget-keys/:widgetKeyId/revoke` - 위젯 키 폐기
