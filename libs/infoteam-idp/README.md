@@ -27,7 +27,7 @@ Infoteam Identity Provider (IDP) 인증을 위한 NestJS 모듈입니다.
 
 ```env
 # Infoteam IDP Configuration
-IDP_URL=https://api.idp.gistory.me
+IDP_URL=https://api.account.gistory.me
 IDP_CLIENT_ID=your_client_id
 IDP_CLIENT_SECRET=your_client_secret
 ```
