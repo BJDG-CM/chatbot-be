@@ -3,6 +3,7 @@ import {
   Logger,
   InternalServerErrorException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type {
   ListResourcesResult,
   ListResourceItem,
@@ -14,7 +15,7 @@ import { UsageService } from '../../usage/usage.service';
 import type { McpTool, OpenRouterMessage } from '../types/open-router.types';
 import { MessageRole } from '../../common/dto/chat-message-input.dto';
 import type { Readable } from 'stream';
-import type { FastifyReply } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import {
   DOCUMENT_SELECTION_SYSTEM_PROMPT,
   getDocumentSelectionUserPrompt,
@@ -57,6 +58,7 @@ export class ChatOrchestrationService {
     private readonly openRouterService: OpenRouterService,
     private readonly chatService: ChatService,
     private readonly usageService: UsageService,
+    private readonly configService: ConfigService,
   ) {}
 
   /**
@@ -1161,19 +1163,32 @@ export class ChatOrchestrationService {
    * @param sessionId 세션 ID
    * @param userQuestion 사용자 질문
    * @param reply Fastify 응답 객체
+   * @param req Fastify 요청 객체 (CORS origin용)
    */
   async handleStreamingResponse(
     sessionId: string,
     userQuestion: string,
     reply: FastifyReply,
+    req: FastifyRequest,
   ): Promise<void> {
     reply.hijack();
+
+    // credentials: true 사용 시 Access-Control-Allow-Origin은 * 불가, 요청 origin을 그대로 반환해야 함
+    const allowedOrigins = [
+      'http://localhost:5173',
+      `https://${this.configService.get<string>('DOMAIN_NAME') ?? ''}`,
+    ];
+    const requestOrigin = req.headers.origin;
+    const corsOrigin =
+      requestOrigin && allowedOrigins.includes(requestOrigin)
+        ? requestOrigin
+        : (allowedOrigins[1] ?? '*');
 
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': corsOrigin,
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     });

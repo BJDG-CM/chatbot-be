@@ -5,6 +5,7 @@ import {
   Body,
   Query,
   Param,
+  Req,
   UseGuards,
   ParseIntPipe,
   DefaultValuePipe,
@@ -21,7 +22,7 @@ import {
   ApiParam,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import type { FastifyReply } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ChatService } from './services/chat.service';
 import { ChatOrchestrationService } from './services/chat-orchestration.service';
 import { McpResourceService } from '../mcp/mcp-resource.service';
@@ -164,6 +165,7 @@ export class ChatController {
   async chatStream(
     @CurrentSession() session: SessionPayload,
     @Body() dto: ChatRequestDto,
+    @Req() req: FastifyRequest,
     @Res() reply: FastifyReply,
   ): Promise<void> {
     const userMessageCount = await this.chatService.getUserMessageCount(
@@ -183,6 +185,7 @@ export class ChatController {
       session.sessionId,
       dto.question,
       reply,
+      req,
     );
   }
 
