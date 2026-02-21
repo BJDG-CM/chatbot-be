@@ -53,7 +53,6 @@ export class UsageService {
     const [session] = await this.db
       .select({
         widgetKeyId: sessions.widgetKeyId,
-        origin: sessions.origin,
         pageUrl: sessions.pageUrl,
       })
       .from(sessions)
@@ -65,8 +64,7 @@ export class UsageService {
       return;
     }
 
-    const rawForDomain = session.origin ?? session.pageUrl;
-    const domain = extractDomain(rawForDomain) || 'unknown';
+    const domain = extractDomain(session.pageUrl) || 'unknown';
 
     const todayUtc = new Date();
     const dateStr = todayUtc.toISOString().slice(0, 10);

@@ -132,7 +132,6 @@ export const sessions = pgTable(
       .references(() => widgetKeys.id, { onDelete: 'cascade' }),
     sessionToken: text('session_token').notNull().unique(),
     pageUrl: varchar('page_url', { length: 2048 }).notNull(),
-    origin: varchar('origin', { length: 512 }),
     expiresAt: timestamp('expires_at').notNull(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },

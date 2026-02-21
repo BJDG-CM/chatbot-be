@@ -65,7 +65,6 @@ export class WidgetAuthService {
         widgetKeyId: widgetKey.id,
         sessionToken: '', // 임시값, 아래에서 JWT 생성 후 업데이트
         pageUrl: dto.pageUrl,
-        origin: null,
         expiresAt,
       })
       .returning();

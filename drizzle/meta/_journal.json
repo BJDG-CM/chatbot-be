@@ -36,6 +36,13 @@
       "when": 1771039773812,
       "tag": "0004_material_james_howlett",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1771660428739,
+      "tag": "0005_ancient_deathstrike",
+      "breakpoints": true
     }
   ]
 }
