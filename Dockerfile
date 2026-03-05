@@ -2,15 +2,15 @@
 FROM oven/bun:1 AS base
 WORKDIR /app
 
-# 의존성 설치 단계
+# 의존성 설치 단계 (postinstall에서 patch-package가 patches/ 적용)
 FROM base AS install
 RUN mkdir -p /temp/dev
-COPY package.json bun.lock /temp/dev/
+COPY package.json bun.lock patches /temp/dev/
 RUN cd /temp/dev && bun install --frozen-lockfile
 
-# 프로덕션 의존성만 설치
+# 프로덕션 의존성만 설치 (postinstall에서 patch-package가 patches/ 적용)
 RUN mkdir -p /temp/prod
-COPY package.json bun.lock /temp/prod/
+COPY package.json bun.lock patches /temp/prod/
 RUN cd /temp/prod && bun install --frozen-lockfile --production
 
 # 빌드 단계
