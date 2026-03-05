@@ -1,0 +1,28 @@
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js b/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js
+index 2e05752..79dda72 100644
+--- a/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js
++++ b/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/index.js
+@@ -455,7 +455,8 @@ class Client extends protocol_js_1.Protocol {
+         (0, helpers_js_1.assertClientRequestTaskCapability)(this._capabilities.tasks?.requests, method, 'Client');
+     }
+     async ping(options) {
+-        return this.request({ method: 'ping' }, types_js_1.EmptyResultSchema, options);
++        // return this.request({ method: 'ping' }, types_js_1.EmptyResultSchema, options);
++        return {};
+     }
+     async complete(params, options) {
+         return this.request({ method: 'completion/complete', params }, types_js_1.CompleteResultSchema, options);
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
+index 9b1e2f3..c0f6a55 100644
+--- a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
++++ b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
+@@ -451,7 +451,8 @@ export class Client extends Protocol {
+         assertClientRequestTaskCapability(this._capabilities.tasks?.requests, method, 'Client');
+     }
+     async ping(options) {
+-        return this.request({ method: 'ping' }, EmptyResultSchema, options);
++        // return this.request({ method: 'ping' }, EmptyResultSchema, options);
++        return {};
+     }
+     async complete(params, options) {
+         return this.request({ method: 'completion/complete', params }, CompleteResultSchema, options);

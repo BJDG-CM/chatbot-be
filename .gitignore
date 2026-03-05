@@ -1,6 +1,9 @@
 # compiled output
 /dist
 /node_modules
+
+# yarn.lock (this project uses bun; yarn.lock is only for generating patches)
+yarn.lock
 /build
 
 # Logs
