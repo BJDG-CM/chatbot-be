@@ -43,6 +43,12 @@ $ cp .env.example .env
 # .env 파일을 열어서 데이터베이스 정보를 입력하세요
 ```
 
+## Patched dependencies
+
+- **@modelcontextprotocol/sdk**: MCP Client와 Server 간 **단일 연결**을 유지하기 위해, SDK의 `ping` 메서드가 서버로 요청을 보내지 않도록 patch-package로 비활성화되어 있습니다. (`patches/@modelcontextprotocol+sdk+1.25.2.patch`)
+- `bun install` 시 `postinstall` 스크립트가 자동으로 패치를 적용합니다.
+- **@modelcontextprotocol/sdk 버전을 올릴 때**: `patches/` 의 패치가 새 버전에 그대로 적용되지 않을 수 있습니다. 버전 업 후 `bun run build` 또는 MCP 연동 테스트로 동작을 확인하고, 필요하면 패치를 수정한 뒤 `bun install --yarn` 후 `npx patch-package @modelcontextprotocol/sdk` 로 패치 파일을 재생성하세요.
+
 ## Environment Variables
 
 `.env` 파일에 다음 환경 변수를 설정하세요:
