@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -44,7 +44,7 @@ export type ListResourcesResult = {
  * 상시 연결을 유지하지 않아 5분 타임아웃·요청 누적 문제를 방지합니다.
  */
 @Injectable()
-export class McpClientService implements OnModuleDestroy {
+export class McpClientService {
   private readonly logger = new Logger(McpClientService.name);
 
   /** list_resources 결과 캐시 (리소스 목록은 자주 바뀌지 않음) */
@@ -56,10 +56,6 @@ export class McpClientService implements OnModuleDestroy {
   private readonly LIST_RESOURCES_CACHE_TTL = 5 * 60 * 1000; // 5분
 
   constructor(private readonly config: ConfigService) {}
-
-  async onModuleDestroy() {
-    // 상시 연결 없음 — 정리할 리소스 없음
-  }
 
   private getBaseUrl(): string {
     const baseUrl = this.config.get<string>('MCP_BASE_URL');
