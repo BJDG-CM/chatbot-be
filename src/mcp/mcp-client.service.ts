@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-} from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -45,14 +40,12 @@ export type ListResourcesResult = {
 
 /**
  * MCP Client Service
- * MCP 서버와의 연결 및 Tool 호출을 관리합니다.
+ * 질문/요청 시에만 MCP 서버에 연결하고, 사용 후 연결을 닫습니다.
+ * 상시 연결을 유지하지 않아 5분 타임아웃·요청 누적 문제를 방지합니다.
  */
 @Injectable()
-export class McpClientService implements OnModuleInit, OnModuleDestroy {
+export class McpClientService {
   private readonly logger = new Logger(McpClientService.name);
-
-  private client: Client | null = null;
-  private transport: StreamableHTTPClientTransport | null = null;
 
   /** list_resources 결과 캐시 (리소스 목록은 자주 바뀌지 않음) */
   private cachedListResources: {
@@ -64,72 +57,62 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
 
   constructor(private readonly config: ConfigService) {}
 
-  async onModuleInit() {
+  private getBaseUrl(): string {
     const baseUrl = this.config.get<string>('MCP_BASE_URL');
     if (!baseUrl) {
-      this.logger.warn(
-        'MCP_BASE_URL is not set, MCP client will not be initialized',
-      );
-      return;
+      throw new Error('MCP_BASE_URL is not set');
     }
-
-    try {
-      // Client 생성
-      this.client = new Client(
-        { name: 'Ziggle Chatbot MCP Client', version: '1.0.0' },
-        {
-          capabilities: {},
-        },
-      );
-
-      this.client.onerror = (err) => {
-        const errorMessage = String(err);
-        // SSE stream disconnected는 정상적인 연결 종료일 수 있으므로 debug 레벨로 처리
-        if (
-          errorMessage.includes('SSE stream disconnected') ||
-          errorMessage.includes('terminated')
-        ) {
-          this.logger.debug(`MCP client connection closed: ${errorMessage}`);
-        } else {
-          this.logger.error(`MCP client error: ${errorMessage}`);
-        }
-      };
-
-      // Transport 생성 및 연결
-      this.transport = new StreamableHTTPClientTransport(new URL(baseUrl));
-      this.attachNotificationHandlers(this.client);
-
-      await this.client.connect(this.transport);
-
-      this.logger.log(
-        `Connected to MCP server: ${baseUrl} (sessionId=${this.transport.sessionId ?? 'none'})`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Failed to initialize MCP client: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    return baseUrl;
   }
 
-  async onModuleDestroy() {
-    try {
-      await this.transport?.close();
-    } catch (e) {
-      this.logger.warn(`Transport close failed: ${String(e)}`);
-    }
+  /**
+   * 요청 시에만 연결하여 fn(client) 실행 후 반드시 연결을 닫습니다.
+   */
+  private async runWithConnection<T>(
+    fn: (client: Client) => Promise<T>,
+  ): Promise<T> {
+    const baseUrl = this.getBaseUrl();
+    const client = new Client(
+      { name: 'GIST Chatbot MCP Client', version: '1.0.0' },
+      { capabilities: {} },
+    );
+
+    client.onerror = (err) => {
+      const msg = String(err);
+      if (
+        msg.includes('SSE stream disconnected') ||
+        msg.includes('terminated')
+      ) {
+        this.logger.debug(`MCP connection closed: ${msg}`);
+      } else {
+        this.logger.error(`MCP client error: ${msg}`);
+      }
+    };
+
+    const transport = new StreamableHTTPClientTransport(new URL(baseUrl));
+    this.attachNotificationHandlers(client);
 
     try {
-      await this.client?.close();
-    } catch (e) {
-      this.logger.warn(`Client close failed: ${String(e)}`);
+      await client.connect(transport);
+      this.logger.debug(
+        `MCP connected: ${baseUrl} (sessionId=${transport.sessionId ?? 'none'})`,
+      );
+      return await fn(client);
+    } finally {
+      try {
+        await transport.close();
+      } catch (e) {
+        this.logger.warn(`Transport close failed: ${String(e)}`);
+      }
+      try {
+        await client.close();
+      } catch (e) {
+        this.logger.warn(`Client close failed: ${String(e)}`);
+      }
     }
-
-    this.transport = null;
-    this.client = null;
   }
 
   private attachNotificationHandlers(client: Client) {
-    // 서버가 로그/이벤트를 보내는 경우 NestJS 로그로 흡수
     client.setNotificationHandler(LoggingMessageNotificationSchema, (n) => {
       this.logger.log(
         `[MCP:${n.params.level}] ${typeof n.params.data === 'string' ? n.params.data : JSON.stringify(n.params.data)}`,
@@ -144,28 +127,19 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private getConnectedClient(): Client {
-    if (!this.client || !this.transport) {
-      throw new Error('MCP client is not connected');
-    }
-    return this.client;
-  }
-
   /**
-   * Tool 목록 조회
-   * @returns Tool 목록
+   * Tool 목록 조회 (요청 시 연결, 완료 후 연결 종료)
    */
   async listTools() {
-    const client = this.getConnectedClient();
-
-    const req: ListToolsRequest = { method: 'tools/list', params: {} };
-    const res = await client.request(req, ListToolsResultSchema);
-
-    return res.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }));
+    return this.runWithConnection(async (client) => {
+      const req: ListToolsRequest = { method: 'tools/list', params: {} };
+      const res = await client.request(req, ListToolsResultSchema);
+      return res.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema,
+      }));
+    });
   }
 
   /**
@@ -272,14 +246,13 @@ export class McpClientService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const client = this.getConnectedClient();
-
-    const req: CallToolRequest = {
-      method: 'tools/call',
-      params: { name, arguments: args },
-    };
-
-    const res = await client.request(req, CallToolResultSchema);
+    const res = await this.runWithConnection(async (client) => {
+      const req: CallToolRequest = {
+        method: 'tools/call',
+        params: { name, arguments: args },
+      };
+      return client.request(req, CallToolResultSchema);
+    });
 
     // list_resources는 동일 파싱 로직으로 처리 후 캐시
     if (name === 'list_resources') {
