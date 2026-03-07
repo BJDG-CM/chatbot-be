@@ -397,38 +397,33 @@ export class ChatOrchestrationService {
   private async fetchSubDocumentContents(
     subDocuments: Array<{ path: string; description: string }>,
   ): Promise<string> {
-    const contents: string[] = [];
-
-    for (const doc of subDocuments) {
-      try {
-        const resourcePath = this.normalizeResourcePath(doc.path);
-        this.logger.debug(`Fetching sub-document: ${resourcePath}`);
-        const toolResult = await this.mcpClientService.callTool(
-          'get_resource',
-          {
-            path: resourcePath,
-          },
-        );
-
-        const content = this.extractContentFromToolResult(toolResult);
-        if (content) {
-          const documentTitle = this.extractDocumentTitle(
-            resourcePath,
-            doc.path,
-            ['md'],
+    const results = await Promise.all(
+      subDocuments.map(async (doc) => {
+        try {
+          const resourcePath = this.normalizeResourcePath(doc.path);
+          this.logger.debug(`Fetching sub-document: ${resourcePath}`);
+          const toolResult = await this.mcpClientService.callTool(
+            'get_resource',
+            { path: resourcePath },
           );
-          contents.push(
-            `\n\n## 하위 문서: ${documentTitle}\n\n**설명**: ${doc.description}\n\n${content}`,
+          const content = this.extractContentFromToolResult(toolResult);
+          if (content) {
+            const documentTitle = this.extractDocumentTitle(
+              resourcePath,
+              doc.path,
+              ['md'],
+            );
+            return `\n\n## 하위 문서: ${documentTitle}\n\n**설명**: ${doc.description}\n\n${content}`;
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Failed to fetch sub-document ${doc.path}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
-      } catch (error) {
-        this.logger.warn(
-          `Failed to fetch sub-document ${doc.path}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-
-    return contents.join('\n');
+        return '';
+      }),
+    );
+    return results.filter(Boolean).join('\n');
   }
 
   /**
@@ -482,7 +477,7 @@ export class ChatOrchestrationService {
             content: selectionPrompt,
           },
         ],
-        this.openRouterService.getModel('light'),
+        this.openRouterService.getModel('normal'),
         { temperature: 0.1, max_tokens: 100 },
       );
 
@@ -554,37 +549,35 @@ export class ChatOrchestrationService {
       return { content: '', usedResources: [] };
     }
 
-    const documentCandidates: Array<{
-      title: string;
-      content: string;
-      path: string;
-    }> = [];
-
     t0 = Date.now();
-    for (const chunkPath of chunkPaths) {
-      try {
-        const pathForTool = this.normalizeResourcePath(chunkPath);
-        this.logger.debug(`Fetching chunk: ${pathForTool}`);
-        const toolResult = await this.mcpClientService.callTool(
-          'get_resource',
-          { path: pathForTool },
-        );
-
-        const content = this.extractContentFromToolResult(toolResult);
-        if (content) {
-          const title = chunkPath.split('/').pop() || chunkPath || '문서';
-          documentCandidates.push({
-            title,
-            content,
-            path: chunkPath,
-          });
+    const chunkResults = await Promise.all(
+      chunkPaths.map(async (chunkPath) => {
+        try {
+          const pathForTool = this.normalizeResourcePath(chunkPath);
+          this.logger.debug(`Fetching chunk: ${pathForTool}`);
+          const toolResult = await this.mcpClientService.callTool(
+            'get_resource',
+            { path: pathForTool },
+          );
+          const content = this.extractContentFromToolResult(toolResult);
+          if (content) {
+            const title = chunkPath.split('/').pop() || chunkPath || '문서';
+            return { title, content, path: chunkPath };
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Failed to fetch chunk ${chunkPath}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      } catch (error) {
-        this.logger.warn(
-          `Failed to fetch chunk ${chunkPath}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+        return null;
+      }),
+    );
+    const documentCandidates = chunkResults.filter(
+      (r): r is { title: string; content: string; path: string } => r !== null,
+    );
+    this.logger.log(
+      `[PERF] get_resource 루프(신 형식, ${chunkPaths.length}개): ${Date.now() - t0}ms`,
+    );
 
     if (documentCandidates.length === 0) {
       return { content: '', usedResources: [] };
@@ -698,46 +691,50 @@ export class ChatOrchestrationService {
     );
 
     t0 = Date.now();
-    const documentCandidates: Array<{
-      title: string;
-      content: string;
-      path: string;
-      formats: string[];
-      subDocuments: Array<{ path: string; description: string }>;
-    }> = [];
-
-    for (const resource of relevantResources) {
-      try {
-        const resourcePath = this.normalizeResourcePath(resource.path);
-        this.logger.debug(`Fetching markdown resource: ${resourcePath}`);
-        const toolResult = await this.mcpClientService.callTool(
-          'get_resource',
-          { path: resourcePath },
-        );
-
-        const content = this.extractContentFromToolResult(toolResult);
-        if (content) {
-          const documentTitle = this.extractDocumentTitle(
-            resourcePath,
-            resource.path,
-            resource.formats,
+    const resourceResults = await Promise.all(
+      relevantResources.map(async (resource) => {
+        try {
+          const resourcePath = this.normalizeResourcePath(resource.path);
+          this.logger.debug(`Fetching markdown resource: ${resourcePath}`);
+          const toolResult = await this.mcpClientService.callTool(
+            'get_resource',
+            { path: resourcePath },
           );
-          const subDocuments = this.parseDocumentLinks(content);
-
-          documentCandidates.push({
-            title: documentTitle,
-            content,
-            path: resource.path,
-            formats: resource.formats || [],
-            subDocuments,
-          });
+          const content = this.extractContentFromToolResult(toolResult);
+          if (content) {
+            const documentTitle = this.extractDocumentTitle(
+              resourcePath,
+              resource.path,
+              resource.formats,
+            );
+            const subDocuments = this.parseDocumentLinks(content);
+            return {
+              title: documentTitle,
+              content,
+              path: resource.path,
+              formats: resource.formats || [],
+              subDocuments,
+            };
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Failed to fetch ${resource.path}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      } catch (error) {
-        this.logger.warn(
-          `Failed to fetch ${resource.path}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
+        return null;
+      }),
+    );
+    const documentCandidates = resourceResults.filter(
+      (
+        r,
+      ): r is {
+        title: string;
+        content: string;
+        path: string;
+        formats: string[];
+        subDocuments: Array<{ path: string; description: string }>;
+      } => r !== null,
+    );
     this.logger.log(
       `[PERF] get_resource 루프(구 형식, ${relevantResources.length}개): ${Date.now() - t0}ms`,
     );
