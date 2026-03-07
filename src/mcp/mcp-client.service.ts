@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -38,14 +39,22 @@ export type ListResourcesResult = {
   total?: number;
 };
 
+/** 한 턴(사용자 메시지 처리) 동안 재사용하는 MCP 연결 */
+type McpSession = {
+  client: Client;
+  transport: StreamableHTTPClientTransport;
+};
+
 /**
  * MCP Client Service
- * 질문/요청 시에만 MCP 서버에 연결하고, 사용 후 연결을 닫습니다.
- * 상시 연결을 유지하지 않아 5분 타임아웃·요청 누적 문제를 방지합니다.
+ * 한 턴(사용자 메시지 처리) 동안 하나의 MCP 연결을 재사용하고, 턴 끝에 연결을 닫습니다.
+ * withSession()으로 감싼 구간 내의 listTools/callTool은 모두 같은 연결을 사용해 속도가 향상됩니다.
  */
 @Injectable()
 export class McpClientService {
   private readonly logger = new Logger(McpClientService.name);
+
+  private readonly mcpStorage = new AsyncLocalStorage<McpSession>();
 
   /** list_resources 결과 캐시 (리소스 목록은 자주 바뀌지 않음) */
   private cachedListResources: {
@@ -66,10 +75,10 @@ export class McpClientService {
   }
 
   /**
-   * 요청 시에만 연결하여 fn(client) 실행 후 반드시 연결을 닫습니다.
+   * MCP 연결 생성 → fn 실행 → 반드시 연결 종료
    */
   private async runWithConnection<T>(
-    fn: (client: Client) => Promise<T>,
+    fn: (client: Client, transport: StreamableHTTPClientTransport) => Promise<T>,
   ): Promise<T> {
     const baseUrl = this.getBaseUrl();
     const client = new Client(
@@ -97,7 +106,7 @@ export class McpClientService {
       this.logger.debug(
         `MCP connected: ${baseUrl} (sessionId=${transport.sessionId ?? 'none'})`,
       );
-      return await fn(client);
+      return await fn(client, transport);
     } finally {
       try {
         await transport.close();
@@ -128,10 +137,33 @@ export class McpClientService {
   }
 
   /**
-   * Tool 목록 조회 (요청 시 연결, 완료 후 연결 종료)
+   * 한 턴(사용자 메시지 처리) 동안 MCP 연결을 재사용합니다.
+   * fn 내부의 모든 listTools/callTool 호출이 같은 연결을 사용합니다.
+   * 턴이 끝나면 반드시 연결을 닫습니다.
+   */
+  async withSession<T>(fn: () => Promise<T>): Promise<T> {
+    return this.runWithConnection(async (client, transport) => {
+      const session: McpSession = { client, transport };
+      return this.mcpStorage.run(session, fn);
+    });
+  }
+
+  /**
+   * 세션 클라이언트가 있으면 사용, 없으면 1회성 연결로 실행
+   */
+  private async withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+    const session = this.mcpStorage.getStore();
+    if (session) {
+      return fn(session.client);
+    }
+    return this.runWithConnection((client, _transport) => fn(client));
+  }
+
+  /**
+   * Tool 목록 조회 (세션 있으면 재사용, 없으면 1회성 연결)
    */
   async listTools() {
-    return this.runWithConnection(async (client) => {
+    return this.withClient(async (client) => {
       const req: ListToolsRequest = { method: 'tools/list', params: {} };
       const res = await client.request(req, ListToolsResultSchema);
       return res.tools.map((t) => ({
@@ -246,7 +278,7 @@ export class McpClientService {
       }
     }
 
-    const res = await this.runWithConnection(async (client) => {
+    const res = await this.withClient(async (client) => {
       const req: CallToolRequest = {
         method: 'tools/call',
         params: { name, arguments: args },

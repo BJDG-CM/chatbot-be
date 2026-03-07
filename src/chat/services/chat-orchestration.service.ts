@@ -540,11 +540,13 @@ export class ChatOrchestrationService {
       `[DEBUG] 1차 선별(description 기준) 입력: 상위 리소스 ${resources.length}개, chunk 총 ${resources.reduce((s, r) => s + (r.chunks?.length ?? 0), 0)}개 → LLM에 전달`,
     );
 
+    let t0 = Date.now();
     const chunkPaths = await this.selectRelevantChunkPaths(
       question,
       resources,
       10,
     );
+    this.logger.log(`[PERF] selectRelevantChunkPaths(LLM): ${Date.now() - t0}ms`);
 
     if (chunkPaths.length === 0) {
       return { content: '', usedResources: [] };
@@ -556,6 +558,7 @@ export class ChatOrchestrationService {
       path: string;
     }> = [];
 
+    t0 = Date.now();
     for (const chunkPath of chunkPaths) {
       try {
         const pathForTool = this.normalizeResourcePath(chunkPath);
@@ -589,6 +592,7 @@ export class ChatOrchestrationService {
       `[DEBUG] 2차 선별(본문 기준) 입력: 후보 문서 ${documentCandidates.length}개 → LLM에 전달`,
     );
 
+    t0 = Date.now();
     const selectedDocuments = await this.selectMostRelevantDocuments(
       question,
       documentCandidates.map((doc) => ({
@@ -596,6 +600,9 @@ export class ChatOrchestrationService {
         content: doc.content,
         path: doc.path,
       })),
+    );
+    this.logger.log(
+      `[PERF] selectMostRelevantDocuments(LLM, 신 형식): ${Date.now() - t0}ms`,
     );
 
     this.logger.log(
@@ -670,10 +677,14 @@ export class ChatOrchestrationService {
       `[DEBUG] 1차 선별(경로 기준) 입력: MD 문서 ${mdResources.length}개 → LLM에 전달`,
     );
 
+    let t0 = Date.now();
     const relevantResources = await this.selectRelevantResourcePaths(
       question,
       mdResources,
       10,
+    );
+    this.logger.log(
+      `[PERF] selectRelevantResourcePaths(LLM, 구 형식): ${Date.now() - t0}ms`,
     );
 
     if (relevantResources.length === 0) {
@@ -684,6 +695,7 @@ export class ChatOrchestrationService {
       `[DEBUG] 1차 선별 결과(상위 관련 문서 경로): ${relevantResources.length}개`,
     );
 
+    t0 = Date.now();
     const documentCandidates: Array<{
       title: string;
       content: string;
@@ -724,6 +736,9 @@ export class ChatOrchestrationService {
         );
       }
     }
+    this.logger.log(
+      `[PERF] get_resource 루프(구 형식, ${relevantResources.length}개): ${Date.now() - t0}ms`,
+    );
 
     if (documentCandidates.length === 0) {
       return { content: '', usedResources: [] };
@@ -733,6 +748,7 @@ export class ChatOrchestrationService {
       `[DEBUG] 2차 선별(본문 기준) 입력: 후보 문서 ${documentCandidates.length}개 → LLM에 전달`,
     );
 
+    t0 = Date.now();
     const selectedDocuments = await this.selectMostRelevantDocuments(
       question,
       documentCandidates.map((doc) => ({
@@ -740,6 +756,9 @@ export class ChatOrchestrationService {
         content: doc.content,
         path: doc.path,
       })),
+    );
+    this.logger.log(
+      `[PERF] selectMostRelevantDocuments(LLM, 구 형식): ${Date.now() - t0}ms`,
     );
 
     this.logger.log(
@@ -846,8 +865,12 @@ export class ChatOrchestrationService {
         this.logger.log(
           `Fetching ${relevantSubDocuments.length} relevant sub-document(s)`,
         );
+        t0 = Date.now();
         const subDocumentContents =
           await this.fetchSubDocumentContents(relevantSubDocuments);
+        this.logger.log(
+          `[PERF] fetchSubDocumentContents(${relevantSubDocuments.length}개): ${Date.now() - t0}ms`,
+        );
         if (subDocumentContents) {
           contents.push('\n\n---\n\n## 관련 하위 문서\n' + subDocumentContents);
         }
@@ -995,26 +1018,34 @@ export class ChatOrchestrationService {
     stream: Readable;
     resources: ResourceInfo[];
   }> {
+    const perfTurnStart = Date.now();
+
     try {
       // 0. 과거 대화 조회 (현재 user 저장 전 → 직전 대화까지 context)
+      let t0 = Date.now();
       const pastMessagesRaw =
         await this.chatService.getMessagesForContext(sessionId);
       const historyMessages: OpenRouterMessage[] = [...pastMessagesRaw]
         .reverse()
         .map((msg) => ({ role: msg.role, content: msg.content }));
+      this.logger.log(`[PERF] getMessagesForContext: ${Date.now() - t0}ms`);
 
       // 1. 사용자 메시지 저장
+      t0 = Date.now();
       await this.chatService.createMessage(sessionId, {
         role: MessageRole.USER,
         content: userQuestion,
       });
+      this.logger.log(`[PERF] createMessage(user): ${Date.now() - t0}ms`);
 
       // 2. list_resources 직접 호출 (도구 선택 LLM 없이)
+      t0 = Date.now();
       this.logger.debug('Calling list_resources...');
       const listResult = (await this.mcpClientService.callTool(
         'list_resources',
         {},
       )) as ListResourcesResult;
+      this.logger.log(`[PERF] list_resources: ${Date.now() - t0}ms`);
 
       // [DEBUG] list_resources 결과: 신 형식(resources+chunks) 또는 구 형식(filteredResources)
       const isNewFormat =
@@ -1050,9 +1081,13 @@ export class ChatOrchestrationService {
       }
 
       // 3. 관련 리소스 내용 가져오기 (신 형식: description 기반 chunk 선별 / 구 형식: 경로 선별 후 본문 fetch)
+      t0 = Date.now();
       const relevantResult = await this.fetchRelevantResourceContents(
         userQuestion,
         listResult,
+      );
+      this.logger.log(
+        `[PERF] fetchRelevantResourceContents: ${Date.now() - t0}ms`,
       );
 
       const hasContent =
@@ -1121,6 +1156,7 @@ export class ChatOrchestrationService {
       }
 
       // 4. 최종 응답 스트리밍 (synthetic assistant tool_call + tool 메시지)
+      t0 = Date.now();
       this.logger.debug('Generating final response with tool results...');
       const messages: OpenRouterMessage[] = [
         { role: 'system', content: FINAL_RESPONSE_SYSTEM_PROMPT },
@@ -1142,6 +1178,12 @@ export class ChatOrchestrationService {
       const stream = await this.openRouterService.generateFinalResponseStream(
         messages,
         toolResults,
+      );
+      this.logger.log(
+        `[PERF] generateFinalResponseStream(시작까지): ${Date.now() - t0}ms`,
+      );
+      this.logger.log(
+        `[PERF] processUserQuestionStream 전체: ${Date.now() - perfTurnStart}ms`,
       );
 
       return { stream, resources: allResources };
@@ -1194,9 +1236,8 @@ export class ChatOrchestrationService {
     });
 
     try {
-      const { stream, resources } = await this.processUserQuestionStream(
-        sessionId,
-        userQuestion,
+      const { stream, resources } = await this.mcpClientService.withSession(
+        () => this.processUserQuestionStream(sessionId, userQuestion),
       );
 
       let accumulatedContent = '';
