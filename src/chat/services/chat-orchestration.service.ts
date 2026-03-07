@@ -213,7 +213,7 @@ export class ChatOrchestrationService {
           { role: 'system', content: CHUNK_SELECTION_SYSTEM_PROMPT },
           { role: 'user', content: userPrompt },
         ],
-        undefined,
+        this.openRouterService.getModel('light'),
         { temperature: 0.1, max_tokens: 500 },
       );
 
@@ -271,7 +271,7 @@ export class ChatOrchestrationService {
           { role: 'system', content: RESOURCE_PATH_SELECTION_SYSTEM_PROMPT },
           { role: 'user', content: userPrompt },
         ],
-        undefined,
+        this.openRouterService.getModel('light'),
         { temperature: 0.1, max_tokens: 200 },
       );
 
@@ -482,7 +482,7 @@ export class ChatOrchestrationService {
             content: selectionPrompt,
           },
         ],
-        undefined,
+        this.openRouterService.getModel('light'),
         { temperature: 0.1, max_tokens: 100 },
       );
 
@@ -546,7 +546,9 @@ export class ChatOrchestrationService {
       resources,
       10,
     );
-    this.logger.log(`[PERF] selectRelevantChunkPaths(LLM): ${Date.now() - t0}ms`);
+    this.logger.log(
+      `[PERF] selectRelevantChunkPaths(LLM): ${Date.now() - t0}ms`,
+    );
 
     if (chunkPaths.length === 0) {
       return { content: '', usedResources: [] };
@@ -1074,7 +1076,7 @@ export class ChatOrchestrationService {
             { role: 'user', content: userQuestion },
           ],
           [],
-          undefined,
+          this.openRouterService.getModel('normal'),
           { temperature: 0 },
         );
         return { stream, resources: [] };
@@ -1103,7 +1105,7 @@ export class ChatOrchestrationService {
             { role: 'user', content: userQuestion },
           ],
           [],
-          undefined,
+          this.openRouterService.getModel('normal'),
           { temperature: 0 },
         );
         return { stream, resources: [] };
@@ -1178,6 +1180,7 @@ export class ChatOrchestrationService {
       const stream = await this.openRouterService.generateFinalResponseStream(
         messages,
         toolResults,
+        this.openRouterService.getModel('heavy'),
       );
       this.logger.log(
         `[PERF] generateFinalResponseStream(시작까지): ${Date.now() - t0}ms`,

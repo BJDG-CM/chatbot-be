@@ -23,11 +23,17 @@ import { getToolSelectionSystemPrompt } from '../prompts';
  * Open Router 서비스
  * LLM을 통해 MCP Tool 선택 및 실행을 관리합니다.
  */
+/** Open Router 모델 용도 */
+export type OpenRouterModelType = 'light' | 'normal' | 'heavy';
+
 @Injectable()
 export class OpenRouterService {
   private readonly logger = new Logger(OpenRouterService.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://openrouter.ai/api/v1';
+  private readonly modelLight: string;
+  private readonly modelNormal: string;
+  private readonly modelHeavy: string;
   private readonly defaultModel: string;
 
   constructor(
@@ -35,11 +41,30 @@ export class OpenRouterService {
     private readonly configService: ConfigService,
   ) {
     this.apiKey = this.configService.getOrThrow<string>('OPEN_ROUTER_API_KEY');
-    this.defaultModel =
-      this.configService.get<string>(
-        'OPEN_ROUTER_MODEL',
-        'anthropic/claude-3.5-sonnet',
-      ) || 'anthropic/claude-3.5-sonnet';
+    const fallback =
+      this.configService.get<string>('OPEN_ROUTER_MODEL') ||
+      'anthropic/claude-3.5-sonnet';
+    this.modelLight =
+      this.configService.get<string>('OPEN_ROUTER_MODEL_LIGHT') || fallback;
+    this.modelNormal =
+      this.configService.get<string>('OPEN_ROUTER_MODEL_NORMAL') || fallback;
+    this.modelHeavy =
+      this.configService.get<string>('OPEN_ROUTER_MODEL_HEAVY') || fallback;
+    this.defaultModel = this.modelNormal;
+  }
+
+  /** 용도별 모델 반환 (light: 선별, normal: 단순 응답, heavy: 최종 답변) */
+  getModel(type: OpenRouterModelType): string {
+    switch (type) {
+      case 'light':
+        return this.modelLight;
+      case 'normal':
+        return this.modelNormal;
+      case 'heavy':
+        return this.modelHeavy;
+      default:
+        return this.defaultModel;
+    }
   }
 
   /**
