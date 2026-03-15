@@ -24,6 +24,7 @@ import { UsageService } from '../usage/usage.service';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { CreateWidgetKeyDto } from '../common/dto/create-widget-key.dto';
 import { RegisterDomainsDto } from '../common/dto/register-domains.dto';
+import { RegisterAppIdDto } from '../common/dto/register-app-id.dto';
 import { InviteCollaboratorDto } from '../common/dto/invite-collaborator.dto';
 import { WidgetKeyDto } from '../common/dto/widget-key.dto';
 import { CollaboratorDto } from '../common/dto/collaborator.dto';
@@ -261,6 +262,123 @@ export class AdminController {
     @Param('domain') domain: string,
   ): Promise<WidgetKeyDto> {
     return this.adminService.removeDomain(widgetKeyId, domain, admin.uuid);
+  }
+
+  @Get('widget-keys/:widgetKeyId/app-ids')
+  @ApiOperation({
+    summary: '위젯 키별 등록 앱 ID 목록 조회',
+    description:
+      '특정 위젯 키에 등록된 허용 앱 ID 목록을 조회합니다. Flutter/네이티브 앱 세션 발급 시 사용됩니다.',
+  })
+  @ApiParam({
+    name: 'widgetKeyId',
+    description: '앱 ID 목록을 조회할 위젯 키의 UUID',
+    type: String,
+  })
+  @ApiResponse({
+    status: 200,
+    description: '성공',
+    schema: {
+      type: 'object',
+      properties: {
+        appIds: { type: 'array', items: { type: 'string' } },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: '인증 실패' })
+  @ApiResponse({
+    status: 403,
+    description: '권한 없음 (본인이 만든 키가 아님)',
+  })
+  @ApiResponse({ status: 404, description: '존재하지 않는 Key ID' })
+  async getAppIds(
+    @CurrentAdmin() admin: AdminContext,
+    @Param('widgetKeyId') widgetKeyId: string,
+  ): Promise<{ appIds: string[] }> {
+    return this.adminService.getAppIds(widgetKeyId, admin.uuid);
+  }
+
+  @Post('widget-keys/:widgetKeyId/app-ids')
+  @ApiOperation({
+    summary: '앱 ID 등록',
+    description: `기존 위젯 키에 앱 ID를 하나씩 등록합니다. clientType=app 세션 발급 시 이 목록에 있는 appId만 허용됩니다.
+
+**인증:** Admin JWT 인증이 필요합니다.`,
+  })
+  @ApiParam({
+    name: 'widgetKeyId',
+    description: '앱 ID를 등록할 위젯 키의 UUID',
+    type: String,
+  })
+  @ApiResponse({
+    status: 200,
+    description: '앱 ID 등록 성공',
+    type: WidgetKeyDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: '잘못된 요청 (이미 등록된 앱 ID 등)',
+  })
+  @ApiResponse({
+    status: 401,
+    description: '인증 실패',
+  })
+  @ApiResponse({
+    status: 403,
+    description: '권한 없음 (본인이 만든 키가 아님)',
+  })
+  @ApiResponse({
+    status: 404,
+    description: '존재하지 않는 Key ID',
+  })
+  async addAppId(
+    @CurrentAdmin() admin: AdminContext,
+    @Param('widgetKeyId') widgetKeyId: string,
+    @Body() dto: RegisterAppIdDto,
+  ): Promise<WidgetKeyDto> {
+    return this.adminService.addAppId(widgetKeyId, dto, admin.uuid);
+  }
+
+  @Delete('widget-keys/:widgetKeyId/app-ids/:appId')
+  @ApiOperation({
+    summary: '앱 ID 삭제',
+    description: `기존 위젯 키에서 앱 ID를 삭제합니다.
+
+**인증:** Admin JWT 인증이 필요합니다.`,
+  })
+  @ApiParam({
+    name: 'widgetKeyId',
+    description: '앱 ID를 삭제할 위젯 키의 UUID',
+    type: String,
+  })
+  @ApiParam({
+    name: 'appId',
+    description: '삭제할 앱 ID (예: com.company.myapp)',
+    type: String,
+  })
+  @ApiResponse({
+    status: 200,
+    description: '앱 ID 삭제 성공',
+    type: WidgetKeyDto,
+  })
+  @ApiResponse({
+    status: 401,
+    description: '인증 실패',
+  })
+  @ApiResponse({
+    status: 403,
+    description: '권한 없음 (본인이 만든 키가 아님)',
+  })
+  @ApiResponse({
+    status: 404,
+    description: '존재하지 않는 Key ID 또는 앱 ID',
+  })
+  async removeAppId(
+    @CurrentAdmin() admin: AdminContext,
+    @Param('widgetKeyId') widgetKeyId: string,
+    @Param('appId') appId: string,
+  ): Promise<WidgetKeyDto> {
+    return this.adminService.removeAppId(widgetKeyId, appId, admin.uuid);
   }
 
   @Patch('widget-keys/:widgetKeyId/revoke')

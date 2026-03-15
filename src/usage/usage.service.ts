@@ -8,7 +8,7 @@ import {
   widgetKeyCollaborators,
 } from '../db';
 import { eq, sql, and, inArray, gte, lte, ne } from 'drizzle-orm';
-import { extractDomain } from '../common/utils/domain-validator.util';
+import { getSourceFromPageUrl } from '../common/utils/domain-validator.util';
 import {
   WidgetKeyStatsDto,
   UsageDataDto,
@@ -64,7 +64,7 @@ export class UsageService {
       return;
     }
 
-    const domain = extractDomain(session.pageUrl) || 'unknown';
+    const domain = getSourceFromPageUrl(session.pageUrl);
 
     const todayUtc = new Date();
     const dateStr = todayUtc.toISOString().slice(0, 10);

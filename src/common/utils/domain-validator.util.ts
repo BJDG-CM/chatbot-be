@@ -84,6 +84,41 @@ export function isDomainAllowed(
 }
 
 /**
+ * appId가 허용된 앱 ID 목록에 포함되는지 확인합니다 (정확히 일치)
+ * @param appId - 검증할 앱 ID (예: com.company.myapp)
+ * @param allowedAppIds - 허용된 앱 ID 배열
+ * @returns 매칭 여부
+ */
+export function isAppIdAllowed(
+  appId: string,
+  allowedAppIds: string[],
+): boolean {
+  if (!appId || !allowedAppIds || allowedAppIds.length === 0) {
+    return false;
+  }
+  const normalized = appId.trim();
+  return allowedAppIds.some((allowed) => allowed.trim() === normalized);
+}
+
+/**
+ * 세션 pageUrl에서 usage 집계용 출처(도메인 또는 appId)를 추출합니다.
+ * app: 접두사가 있으면 앱 클라이언트로 간주하고 나머지를 반환, 아니면 도메인 추출.
+ * @param pageUrl - 세션에 저장된 pageUrl (웹은 URL, 앱은 "app:${appId}" 형식)
+ * @returns usage_daily.domain에 넣을 값 (도메인 또는 appId, 없으면 'unknown')
+ */
+export function getSourceFromPageUrl(pageUrl: string): string {
+  if (!pageUrl || typeof pageUrl !== 'string') {
+    return 'unknown';
+  }
+  const trimmed = pageUrl.trim();
+  if (trimmed.startsWith('app:')) {
+    const appId = trimmed.slice(4).trim();
+    return appId || 'unknown';
+  }
+  return extractDomain(trimmed) || 'unknown';
+}
+
+/**
  * Origin 헤더와 pageUrl에서 추출한 도메인이 일치하는지 확인합니다
  * Spoofing 방지를 위한 검증입니다
  * @param origin - Origin 헤더 값

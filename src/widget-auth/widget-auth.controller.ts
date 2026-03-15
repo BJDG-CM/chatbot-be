@@ -12,12 +12,11 @@ export class WidgetAuthController {
   @Post('session')
   @ApiOperation({
     summary: '위젯 세션 토큰 발급',
-    description: `위젯 키와 현재 페이지의 도메인을 검증하여 세션 토큰을 발급합니다.
+    description: `위젯 키와 클라이언트 타입에 따라 검증 후 세션 토큰을 발급합니다.
 
-**검증 로직 상세:**
-1. body의 pageUrl에서 도메인을 추출합니다.
-2. 추출된 도메인(프로토콜 제거)이 DB의 allowedDomains 규칙과 매칭되는지 확인합니다.
-3. 해당 widgetKey가 REVOKED 상태라면 발급을 거부합니다.
+**clientType = web (또는 생략):** body의 pageUrl에서 도메인을 추출해 allowedDomains와 매칭합니다.
+**clientType = app:** body의 appId가 allowedAppIds 목록에 있는지 확인합니다.
+공통: widgetKey가 REVOKED 상태라면 발급을 거부합니다.
 `,
   })
   @ApiResponse({
@@ -31,7 +30,7 @@ export class WidgetAuthController {
   })
   @ApiResponse({
     status: 403,
-    description: '도메인 검증 실패 또는 REVOKED 된 키',
+    description: '도메인/앱 ID 검증 실패 또는 REVOKED 된 키',
   })
   @ApiResponse({
     status: 404,

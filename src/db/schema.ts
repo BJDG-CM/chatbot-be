@@ -69,6 +69,10 @@ export const widgetKeys = pgTable(
       .notNull()
       .$type<string[]>()
       .default([]),
+    allowedAppIds: jsonb('allowed_app_ids')
+      .notNull()
+      .$type<string[]>()
+      .default([]),
     createdByIdpUuid: varchar('created_by_idp_uuid', { length: 255 }),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
