@@ -43,6 +43,13 @@
       "when": 1771660428739,
       "tag": "0005_ancient_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1773549888478,
+      "tag": "0006_good_black_tarantula",
+      "breakpoints": true
     }
   ]
 }

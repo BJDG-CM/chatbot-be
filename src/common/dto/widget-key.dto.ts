@@ -39,6 +39,13 @@ export class WidgetKeyDto {
   allowedDomains: string[];
 
   @ApiProperty({
+    description: '허용된 앱 ID 목록 (Flutter/네이티브 앱용)',
+    type: [String],
+    example: ['com.company.myapp'],
+  })
+  allowedAppIds: string[];
+
+  @ApiProperty({
     description: '생성 일시',
     example: '2024-01-08T10:30:00.000Z',
   })

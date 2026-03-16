@@ -12,10 +12,11 @@ import {
   widgetKeyCollaborators,
   admins,
 } from '../db';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { generateWidgetKey } from '../common/utils/widget-key-generator.util';
 import { CreateWidgetKeyDto } from '../common/dto/create-widget-key.dto';
 import { RegisterDomainsDto } from '../common/dto/register-domains.dto';
+import { RegisterAppIdDto } from '../common/dto/register-app-id.dto';
 import { InviteCollaboratorDto } from '../common/dto/invite-collaborator.dto';
 import { WidgetKeyDto, WidgetKeyStatus } from '../common/dto/widget-key.dto';
 import { CollaboratorDto } from '../common/dto/collaborator.dto';
@@ -50,6 +51,32 @@ export class AdminService {
     return { domains: key.allowedDomains ?? [] };
   }
 
+  async getAppIds(
+    widgetKeyId: string,
+    adminUuid: string,
+  ): Promise<{ appIds: string[] }> {
+    const [key] = await this.db
+      .select({
+        allowedAppIds: widgetKeys.allowedAppIds,
+        createdByIdpUuid: widgetKeys.createdByIdpUuid,
+      })
+      .from(widgetKeys)
+      .where(eq(widgetKeys.id, widgetKeyId))
+      .limit(1);
+
+    if (!key) {
+      throw new NotFoundException('Widget key not found');
+    }
+
+    if (key.createdByIdpUuid !== adminUuid) {
+      throw new ForbiddenException(
+        'You do not have permission to view this widget key',
+      );
+    }
+
+    return { appIds: key.allowedAppIds ?? [] };
+  }
+
   async getAllWidgetKeys(adminUuid: string): Promise<WidgetKeyDto[]> {
     // 소유 키
     const ownedKeys = await this.db
@@ -70,6 +97,7 @@ export class AdminService {
         secretKey: widgetKeys.secretKey,
         status: widgetKeys.status,
         allowedDomains: widgetKeys.allowedDomains,
+        allowedAppIds: widgetKeys.allowedAppIds,
         createdAt: widgetKeys.createdAt,
       })
       .from(widgetKeyCollaborators)
@@ -92,6 +120,7 @@ export class AdminService {
         secretKey: key.secretKey,
         status: key.status as WidgetKeyStatus,
         allowedDomains: key.allowedDomains,
+        allowedAppIds: key.allowedAppIds ?? [],
         createdAt: key.createdAt,
       })),
       ...sharedKeys.map((key) => ({
@@ -100,6 +129,7 @@ export class AdminService {
         secretKey: '***', // 협업자(VIEWER)는 실제 키 노출 안 함
         status: key.status as WidgetKeyStatus,
         allowedDomains: key.allowedDomains,
+        allowedAppIds: key.allowedAppIds ?? [],
         createdAt: key.createdAt,
       })),
     ];
@@ -143,7 +173,7 @@ export class AdminService {
       throw new BadRequestException('Failed to generate unique widget key');
     }
 
-    // DB에 저장 (도메인 없이)
+    // DB에 저장 (도메인/앱 ID 없이)
     const [newKey] = await this.db
       .insert(widgetKeys)
       .values({
@@ -151,6 +181,7 @@ export class AdminService {
         secretKey: secretKey!,
         status: 'ACTIVE',
         allowedDomains: [],
+        allowedAppIds: [],
         createdByIdpUuid: adminUuid,
       })
       .returning();
@@ -161,6 +192,7 @@ export class AdminService {
       secretKey: newKey.secretKey,
       status: newKey.status as WidgetKeyStatus,
       allowedDomains: newKey.allowedDomains,
+      allowedAppIds: newKey.allowedAppIds ?? [],
       createdAt: newKey.createdAt,
     };
   }
@@ -221,6 +253,7 @@ export class AdminService {
       secretKey: updatedKey.secretKey,
       status: updatedKey.status as WidgetKeyStatus,
       allowedDomains: updatedKey.allowedDomains,
+      allowedAppIds: updatedKey.allowedAppIds ?? [],
       createdAt: updatedKey.createdAt,
     };
   }
@@ -262,8 +295,62 @@ export class AdminService {
       secretKey: updatedKey.secretKey,
       status: updatedKey.status as WidgetKeyStatus,
       allowedDomains: updatedKey.allowedDomains,
+      allowedAppIds: updatedKey.allowedAppIds ?? [],
       createdAt: updatedKey.createdAt,
     };
+  }
+
+  async addAppId(
+    widgetKeyId: string,
+    dto: RegisterAppIdDto,
+    adminUuid: string,
+  ): Promise<WidgetKeyDto> {
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.execute(
+        sql`SELECT * FROM widget_keys WHERE id = ${widgetKeyId} FOR UPDATE`,
+      );
+      const raw =
+        Array.isArray(rows) ? rows[0] : (rows as { rows?: unknown[] }).rows?.[0];
+      if (!raw || typeof raw !== 'object') {
+        throw new NotFoundException('Widget key not found');
+      }
+      const row = raw as {
+        created_by_idp_uuid: string | null;
+        allowed_app_ids: string[] | null;
+      };
+      if (row.created_by_idp_uuid !== adminUuid) {
+        throw new ForbiddenException(
+          'You do not have permission to modify this widget key',
+        );
+      }
+      const existingAppIds = row.allowed_app_ids ?? [];
+      if (existingAppIds.includes(dto.appId)) {
+        throw new BadRequestException('App ID already exists');
+      }
+      const updatedAppIds = [...existingAppIds, dto.appId];
+
+      const [updatedKey] = await tx
+        .update(widgetKeys)
+        .set({
+          allowedAppIds: updatedAppIds,
+          updatedAt: new Date(),
+        })
+        .where(eq(widgetKeys.id, widgetKeyId))
+        .returning();
+
+      if (!updatedKey) {
+        throw new NotFoundException('Widget key not found');
+      }
+      return {
+        id: updatedKey.id,
+        name: updatedKey.name,
+        secretKey: updatedKey.secretKey,
+        status: updatedKey.status as WidgetKeyStatus,
+        allowedDomains: updatedKey.allowedDomains,
+        allowedAppIds: updatedKey.allowedAppIds ?? [],
+        createdAt: updatedKey.createdAt,
+      };
+    });
   }
 
   async removeDomain(
@@ -315,8 +402,62 @@ export class AdminService {
       secretKey: updatedKey.secretKey,
       status: updatedKey.status as WidgetKeyStatus,
       allowedDomains: updatedKey.allowedDomains,
+      allowedAppIds: updatedKey.allowedAppIds ?? [],
       createdAt: updatedKey.createdAt,
     };
+  }
+
+  async removeAppId(
+    widgetKeyId: string,
+    appId: string,
+    adminUuid: string,
+  ): Promise<WidgetKeyDto> {
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.execute(
+        sql`SELECT * FROM widget_keys WHERE id = ${widgetKeyId} FOR UPDATE`,
+      );
+      const raw =
+        Array.isArray(rows) ? rows[0] : (rows as { rows?: unknown[] }).rows?.[0];
+      if (!raw || typeof raw !== 'object') {
+        throw new NotFoundException('Widget key not found');
+      }
+      const row = raw as {
+        created_by_idp_uuid: string | null;
+        allowed_app_ids: string[] | null;
+      };
+      if (row.created_by_idp_uuid !== adminUuid) {
+        throw new ForbiddenException(
+          'You do not have permission to modify this widget key',
+        );
+      }
+      const existingAppIds = row.allowed_app_ids ?? [];
+      if (!existingAppIds.includes(appId)) {
+        throw new NotFoundException('App ID not found');
+      }
+      const updatedAppIds = existingAppIds.filter((id) => id !== appId);
+
+      const [updatedKey] = await tx
+        .update(widgetKeys)
+        .set({
+          allowedAppIds: updatedAppIds,
+          updatedAt: new Date(),
+        })
+        .where(eq(widgetKeys.id, widgetKeyId))
+        .returning();
+
+      if (!updatedKey) {
+        throw new NotFoundException('Widget key not found');
+      }
+      return {
+        id: updatedKey.id,
+        name: updatedKey.name,
+        secretKey: updatedKey.secretKey,
+        status: updatedKey.status as WidgetKeyStatus,
+        allowedDomains: updatedKey.allowedDomains,
+        allowedAppIds: updatedKey.allowedAppIds ?? [],
+        createdAt: updatedKey.createdAt,
+      };
+    });
   }
 
   async inviteCollaborator(

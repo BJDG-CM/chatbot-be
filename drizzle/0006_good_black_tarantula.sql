@@ -1,0 +1,1 @@
+ALTER TABLE "widget_keys" ADD COLUMN "allowed_app_ids" jsonb DEFAULT '[]'::jsonb NOT NULL;
