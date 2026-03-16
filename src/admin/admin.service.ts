@@ -12,7 +12,7 @@ import {
   widgetKeyCollaborators,
   admins,
 } from '../db';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { generateWidgetKey } from '../common/utils/widget-key-generator.util';
 import { CreateWidgetKeyDto } from '../common/dto/create-widget-key.dto';
 import { RegisterDomainsDto } from '../common/dto/register-domains.dto';
@@ -305,47 +305,52 @@ export class AdminService {
     dto: RegisterAppIdDto,
     adminUuid: string,
   ): Promise<WidgetKeyDto> {
-    const [existingKey] = await this.db
-      .select()
-      .from(widgetKeys)
-      .where(eq(widgetKeys.id, widgetKeyId))
-      .limit(1);
-
-    if (!existingKey) {
-      throw new NotFoundException('Widget key not found');
-    }
-
-    if (existingKey.createdByIdpUuid !== adminUuid) {
-      throw new ForbiddenException(
-        'You do not have permission to modify this widget key',
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.execute(
+        sql`SELECT * FROM widget_keys WHERE id = ${widgetKeyId} FOR UPDATE`,
       );
-    }
+      const raw =
+        Array.isArray(rows) ? rows[0] : (rows as { rows?: unknown[] }).rows?.[0];
+      if (!raw || typeof raw !== 'object') {
+        throw new NotFoundException('Widget key not found');
+      }
+      const row = raw as {
+        created_by_idp_uuid: string | null;
+        allowed_app_ids: string[] | null;
+      };
+      if (row.created_by_idp_uuid !== adminUuid) {
+        throw new ForbiddenException(
+          'You do not have permission to modify this widget key',
+        );
+      }
+      const existingAppIds = row.allowed_app_ids ?? [];
+      if (existingAppIds.includes(dto.appId)) {
+        throw new BadRequestException('App ID already exists');
+      }
+      const updatedAppIds = [...existingAppIds, dto.appId];
 
-    const existingAppIds = existingKey.allowedAppIds ?? [];
-    if (existingAppIds.includes(dto.appId)) {
-      throw new BadRequestException('App ID already exists');
-    }
+      const [updatedKey] = await tx
+        .update(widgetKeys)
+        .set({
+          allowedAppIds: updatedAppIds,
+          updatedAt: new Date(),
+        })
+        .where(eq(widgetKeys.id, widgetKeyId))
+        .returning();
 
-    const updatedAppIds = [...existingAppIds, dto.appId];
-
-    const [updatedKey] = await this.db
-      .update(widgetKeys)
-      .set({
-        allowedAppIds: updatedAppIds,
-        updatedAt: new Date(),
-      })
-      .where(eq(widgetKeys.id, widgetKeyId))
-      .returning();
-
-    return {
-      id: updatedKey.id,
-      name: updatedKey.name,
-      secretKey: updatedKey.secretKey,
-      status: updatedKey.status as WidgetKeyStatus,
-      allowedDomains: updatedKey.allowedDomains,
-      allowedAppIds: updatedKey.allowedAppIds ?? [],
-      createdAt: updatedKey.createdAt,
-    };
+      if (!updatedKey) {
+        throw new NotFoundException('Widget key not found');
+      }
+      return {
+        id: updatedKey.id,
+        name: updatedKey.name,
+        secretKey: updatedKey.secretKey,
+        status: updatedKey.status as WidgetKeyStatus,
+        allowedDomains: updatedKey.allowedDomains,
+        allowedAppIds: updatedKey.allowedAppIds ?? [],
+        createdAt: updatedKey.createdAt,
+      };
+    });
   }
 
   async removeDomain(
@@ -407,47 +412,52 @@ export class AdminService {
     appId: string,
     adminUuid: string,
   ): Promise<WidgetKeyDto> {
-    const [existingKey] = await this.db
-      .select()
-      .from(widgetKeys)
-      .where(eq(widgetKeys.id, widgetKeyId))
-      .limit(1);
-
-    if (!existingKey) {
-      throw new NotFoundException('Widget key not found');
-    }
-
-    if (existingKey.createdByIdpUuid !== adminUuid) {
-      throw new ForbiddenException(
-        'You do not have permission to modify this widget key',
+    return this.db.transaction(async (tx) => {
+      const rows = await tx.execute(
+        sql`SELECT * FROM widget_keys WHERE id = ${widgetKeyId} FOR UPDATE`,
       );
-    }
+      const raw =
+        Array.isArray(rows) ? rows[0] : (rows as { rows?: unknown[] }).rows?.[0];
+      if (!raw || typeof raw !== 'object') {
+        throw new NotFoundException('Widget key not found');
+      }
+      const row = raw as {
+        created_by_idp_uuid: string | null;
+        allowed_app_ids: string[] | null;
+      };
+      if (row.created_by_idp_uuid !== adminUuid) {
+        throw new ForbiddenException(
+          'You do not have permission to modify this widget key',
+        );
+      }
+      const existingAppIds = row.allowed_app_ids ?? [];
+      if (!existingAppIds.includes(appId)) {
+        throw new NotFoundException('App ID not found');
+      }
+      const updatedAppIds = existingAppIds.filter((id) => id !== appId);
 
-    const existingAppIds = existingKey.allowedAppIds ?? [];
-    if (!existingAppIds.includes(appId)) {
-      throw new NotFoundException('App ID not found');
-    }
+      const [updatedKey] = await tx
+        .update(widgetKeys)
+        .set({
+          allowedAppIds: updatedAppIds,
+          updatedAt: new Date(),
+        })
+        .where(eq(widgetKeys.id, widgetKeyId))
+        .returning();
 
-    const updatedAppIds = existingAppIds.filter((id) => id !== appId);
-
-    const [updatedKey] = await this.db
-      .update(widgetKeys)
-      .set({
-        allowedAppIds: updatedAppIds,
-        updatedAt: new Date(),
-      })
-      .where(eq(widgetKeys.id, widgetKeyId))
-      .returning();
-
-    return {
-      id: updatedKey.id,
-      name: updatedKey.name,
-      secretKey: updatedKey.secretKey,
-      status: updatedKey.status as WidgetKeyStatus,
-      allowedDomains: updatedKey.allowedDomains,
-      allowedAppIds: updatedKey.allowedAppIds ?? [],
-      createdAt: updatedKey.createdAt,
-    };
+      if (!updatedKey) {
+        throw new NotFoundException('Widget key not found');
+      }
+      return {
+        id: updatedKey.id,
+        name: updatedKey.name,
+        secretKey: updatedKey.secretKey,
+        status: updatedKey.status as WidgetKeyStatus,
+        allowedDomains: updatedKey.allowedDomains,
+        allowedAppIds: updatedKey.allowedAppIds ?? [],
+        createdAt: updatedKey.createdAt,
+      };
+    });
   }
 
   async inviteCollaborator(
