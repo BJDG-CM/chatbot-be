@@ -9,6 +9,7 @@ import { firstValueFrom } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { AxiosError } from 'axios';
 import type { Readable } from 'stream';
+import { inspect } from 'node:util';
 import type {
   McpTool,
   OpenRouterTool,
@@ -291,13 +292,33 @@ ${params}`;
 
   private safeStringify(value: unknown, maxLen: number = 2000): string {
     try {
-      const str =
-        typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      if (typeof value === 'string') {
+        return value.length > maxLen
+          ? value.slice(0, maxLen) + '...(truncated)'
+          : value;
+      }
+
+      // Buffer는 JSON.stringify하면 {}처럼 찍히기 쉬워 text로 변환합니다.
+      if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value as Buffer)) {
+        const str = (value as Buffer).toString('utf8');
+        return str.length > maxLen
+          ? str.slice(0, maxLen) + '...(truncated)'
+          : str;
+      }
+
+      const str = JSON.stringify(value, null, 2);
       return str.length > maxLen
         ? str.slice(0, maxLen) + '...(truncated)'
         : str;
     } catch {
-      return String(value);
+      const str = inspect(value, {
+        depth: 5,
+        maxArrayLength: 50,
+        breakLength: 120,
+      });
+      return str.length > maxLen
+        ? str.slice(0, maxLen) + '...(truncated)'
+        : str;
     }
   }
 

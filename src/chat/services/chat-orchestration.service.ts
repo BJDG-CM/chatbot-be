@@ -1110,7 +1110,16 @@ export class ChatOrchestrationService {
 
       const resultText =
         listResult.texts.join('\n') || JSON.stringify(listResult.raw, null, 2);
-      const fullContent = resultText + '\n\n' + relevantResult.content;
+
+      // OpenRouter 입력 길이가 커지면 400이 발생할 수 있어, tool 호출 컨텐츠는 하드 캡을 둡니다.
+      const MAX_TOOL_CONTENT_CHARS = 50000;
+      let fullContent = resultText + '\n\n' + relevantResult.content;
+      const fullContentOriginalChars = fullContent.length;
+      let fullContentWasTruncated = false;
+      if (fullContent.length > MAX_TOOL_CONTENT_CHARS) {
+        fullContent = `${fullContent.slice(0, MAX_TOOL_CONTENT_CHARS)}\n\n[Truncated: tool content too long]`;
+        fullContentWasTruncated = true;
+      }
 
       const syntheticToolCallId = 'list_resources_0';
       const toolResults: Array<{
@@ -1193,7 +1202,7 @@ export class ChatOrchestrationService {
       }
 
       this.logger.debug(
-        `[DEBUG] Final OpenRouter request summary: model=heavy, messages=${messages.length}, roles=${JSON.stringify(roleCounts)}, contentNullCount=${contentNullCount}, assistantToolCalls=${assistantToolCalls}, toolResults=${toolResults.length}, toolResultsContentCharsSum=${toolResultsContentCharsSum}`,
+        `[DEBUG] Final OpenRouter request summary: model=heavy, messages=${messages.length}, roles=${JSON.stringify(roleCounts)}, contentNullCount=${contentNullCount}, assistantToolCalls=${assistantToolCalls}, toolResults=${toolResults.length}, toolResultsContentCharsSum=${toolResultsContentCharsSum}, fullContentOriginalChars=${fullContentOriginalChars}, fullContentWasTruncated=${fullContentWasTruncated}`,
       );
 
       const stream = await this.openRouterService.generateFinalResponseStream(
