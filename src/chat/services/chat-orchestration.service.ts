@@ -214,7 +214,7 @@ export class ChatOrchestrationService {
           { role: 'user', content: userPrompt },
         ],
         this.openRouterService.getModel('light'),
-        { temperature: 0.1, max_tokens: 500 },
+        { temperature: 0.1, max_tokens: 5000 },
       );
 
       let selectedText = response.choices[0]?.message?.content?.trim() || '';
