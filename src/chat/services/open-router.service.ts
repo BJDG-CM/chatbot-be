@@ -192,6 +192,15 @@ ${params}`;
       max_tokens: 2000,
     };
 
+    const requestLogSummary = {
+      model: request.model,
+      stream: false,
+      temperature: request.temperature,
+      max_tokens: request.max_tokens,
+      messages: this.summarizeOpenRouterMessages(messages),
+      toolsCount: tools.length,
+    };
+
     try {
       const response = await firstValueFrom(
         this.httpService
@@ -210,9 +219,18 @@ ${params}`;
           )
           .pipe(
             catchError((error: AxiosError) => {
+              const responseData = error.response?.data;
               this.logger.error(
                 `Open Router API error: ${error.message}`,
                 error instanceof Error ? error.stack : undefined,
+              );
+              if (responseData != null) {
+                this.logger.error(
+                  `Open Router error response body: ${this.safeStringify(responseData)}`,
+                );
+              }
+              this.logger.error(
+                `Open Router request summary: ${this.safeStringify(requestLogSummary)}`,
               );
               throw new InternalServerErrorException(
                 `Failed to call Open Router API: ${error.message}`,
@@ -271,6 +289,53 @@ ${params}`;
     return toolCalls;
   }
 
+  private safeStringify(value: unknown, maxLen: number = 2000): string {
+    try {
+      const str =
+        typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+      return str.length > maxLen
+        ? str.slice(0, maxLen) + '...(truncated)'
+        : str;
+    } catch {
+      return String(value);
+    }
+  }
+
+  private summarizeOpenRouterMessages(messages: OpenRouterMessage[]) {
+    const roleCounts: Record<string, number> = {};
+    let assistantToolCalls = 0;
+    let toolRoleMessages = 0;
+    let toolRoleHasNameField = 0;
+    let contentNullCount = 0;
+    let contentCharsSum = 0;
+
+    for (const m of messages) {
+      roleCounts[m.role] = (roleCounts[m.role] ?? 0) + 1;
+      if (m.role === 'assistant' && m.tool_calls?.length) {
+        assistantToolCalls += m.tool_calls.length;
+      }
+      if (m.role === 'tool') {
+        toolRoleMessages += 1;
+        // 일부 모델/프로바이더에서 role=tool 메시지의 name 필드가 스키마에 없을 수 있음
+        if ((m as unknown as { name?: unknown }).name != null) {
+          toolRoleHasNameField += 1;
+        }
+      }
+      if (m.content === null) contentNullCount += 1;
+      if (typeof m.content === 'string') contentCharsSum += m.content.length;
+    }
+
+    return {
+      total: messages.length,
+      roleCounts,
+      assistantToolCalls,
+      toolRoleMessages,
+      toolRoleHasNameField,
+      contentNullCount,
+      contentCharsSum,
+    };
+  }
+
   /**
    * Tool 실행 결과를 LLM에 전달하여 최종 응답을 스트리밍으로 생성
    * @param messages 이전 대화 내역
@@ -306,6 +371,19 @@ ${params}`;
       stream: true,
     };
 
+    const requestLogSummary = {
+      model: request.model,
+      stream: request.stream,
+      temperature: request.temperature,
+      max_tokens: request.max_tokens,
+      toolResultsCount: toolResults.length,
+      toolResultsContentCharsSum: toolResults.reduce(
+        (sum, r) => sum + (r.content?.length ?? 0),
+        0,
+      ),
+      messages: this.summarizeOpenRouterMessages(updatedMessages),
+    };
+
     try {
       const response = await firstValueFrom(
         this.httpService
@@ -323,9 +401,18 @@ ${params}`;
             catchError((error: AxiosError) => {
               const errorMessage = error.message;
               const statusCode = error.response?.status;
+              const responseData = error.response?.data;
               this.logger.error(
                 `Open Router API error (status ${statusCode}): ${errorMessage}`,
                 error instanceof Error ? error.stack : undefined,
+              );
+              if (responseData != null) {
+                this.logger.error(
+                  `Open Router 400 response body: ${this.safeStringify(responseData)}`,
+                );
+              }
+              this.logger.error(
+                `Open Router request summary: ${this.safeStringify(requestLogSummary)}`,
               );
               throw new InternalServerErrorException(
                 `Failed to call Open Router API: ${errorMessage}`,
@@ -359,6 +446,14 @@ ${params}`;
       max_tokens: options?.max_tokens ?? 2000,
     };
 
+    const requestLogSummary = {
+      model: request.model,
+      stream: false,
+      temperature: request.temperature,
+      max_tokens: request.max_tokens,
+      messages: this.summarizeOpenRouterMessages(messages),
+    };
+
     try {
       const response = await firstValueFrom(
         this.httpService
@@ -379,9 +474,18 @@ ${params}`;
             catchError((error: AxiosError) => {
               const errorMessage = error.message;
               const statusCode = error.response?.status;
+              const responseData = error.response?.data;
               this.logger.error(
                 `Open Router API error (status ${statusCode}): ${errorMessage}`,
                 error instanceof Error ? error.stack : undefined,
+              );
+              if (responseData != null) {
+                this.logger.error(
+                  `Open Router error response body: ${this.safeStringify(responseData)}`,
+                );
+              }
+              this.logger.error(
+                `Open Router request summary: ${this.safeStringify(requestLogSummary)}`,
               );
               throw new InternalServerErrorException(
                 `Failed to call Open Router API: ${errorMessage}`,

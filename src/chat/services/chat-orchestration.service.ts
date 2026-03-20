@@ -1174,6 +1174,28 @@ export class ChatOrchestrationService {
         },
       ];
 
+      const toolResultsContentCharsSum = toolResults.reduce(
+        (sum, r) => sum + (r.content?.length ?? 0),
+        0,
+      );
+
+      const roleCounts: Record<string, number> = {};
+      let assistantToolCalls = 0;
+      let contentNullCount = 0;
+      for (const m of messages) {
+        roleCounts[m.role] = (roleCounts[m.role] ?? 0) + 1;
+        if (m.role === 'assistant') {
+          assistantToolCalls += m.tool_calls?.length ?? 0;
+        }
+        if (m.content === null) {
+          contentNullCount += 1;
+        }
+      }
+
+      this.logger.debug(
+        `[DEBUG] Final OpenRouter request summary: model=heavy, messages=${messages.length}, roles=${JSON.stringify(roleCounts)}, contentNullCount=${contentNullCount}, assistantToolCalls=${assistantToolCalls}, toolResults=${toolResults.length}, toolResultsContentCharsSum=${toolResultsContentCharsSum}`,
+      );
+
       const stream = await this.openRouterService.generateFinalResponseStream(
         messages,
         toolResults,
