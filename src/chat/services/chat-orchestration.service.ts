@@ -803,6 +803,7 @@ export class ChatOrchestrationService {
     }
 
     for (const selected of selectedDocuments) {
+      console.log('selected', selected);
       const path = selected.path;
       const firstSegment = path.split('/')[0];
       for (const r of filteredResources) {
