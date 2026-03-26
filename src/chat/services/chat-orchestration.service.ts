@@ -763,6 +763,7 @@ export class ChatOrchestrationService {
     this.logger.log(
       `[DEBUG] 2차 선별 결과(최종 사용 문서): ${selectedDocuments.length}개`,
     );
+    console.log('selectedDocuments', selectedDocuments);
 
     if (selectedDocuments.length === 0) {
       this.logger.log('No documents selected by LLM as relevant');
@@ -803,7 +804,6 @@ export class ChatOrchestrationService {
     }
 
     for (const selected of selectedDocuments) {
-      console.log('selected', selected);
       const path = selected.path;
       const firstSegment = path.split('/')[0];
       for (const r of filteredResources) {
