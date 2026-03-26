@@ -1135,6 +1135,7 @@ export class ChatOrchestrationService {
       ];
 
       const allResources: ResourceInfo[] = [];
+      console.log('relevantResult.usedResources', relevantResult.usedResources);
       for (const r of relevantResult.usedResources) {
         if (!r.path || !r.formats) continue;
         const pdfPngFormats = r.formats.filter(
