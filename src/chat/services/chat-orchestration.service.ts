@@ -141,6 +141,43 @@ export class ChatOrchestrationService {
   }
 
   /**
+   * FE·리소스 API용 PDF 경로: 하위 chunk/이미지 경로가 아니라 상위 묶음 PDF 한 개
+   * 예: `에어컨+…/세부/파일.png` → `에어컨+….pdf` (첫 `/` 앞 세그먼트 + `.pdf`)
+   */
+  private normalizeTopLevelPdfPathForFe(resourcePath: string): string {
+    const first = resourcePath.split('/')[0]?.trim() || resourcePath;
+    const base = first.replace(/\.(pdf|png|md|jpe?g|gif|webp)$/i, '');
+    return `${base}.pdf`;
+  }
+
+  /**
+   * SSE·메타데이터용 참조 문서: **PDF 번들만** (마크다운 chunk 경로는 상위 세그먼트 + `.pdf`로 변환).
+   * 예: `2026년+학사편람/…/졸업요건.md` → `2026년+학사편람.pdf`
+   */
+  private appendFePdfResourceEntryFromUsed(
+    out: ResourceInfo[],
+    seenPdfPaths: Set<string>,
+    r: { path: string; formats: string[] },
+  ): void {
+    if (!r.path || !r.formats?.length) return;
+    const contributes =
+      r.formats.includes('md') ||
+      r.formats.includes('pdf') ||
+      r.formats.includes('png');
+    if (!contributes) return;
+
+    const pathForFe = this.normalizeTopLevelPdfPathForFe(r.path);
+    if (seenPdfPaths.has(pathForFe)) return;
+    seenPdfPaths.add(pathForFe);
+
+    out.push({
+      path: pathForFe,
+      formats: ['pdf'],
+      url: this.generateResourceUrl(pathForFe),
+    });
+  }
+
+  /**
    * get_resource 툴 응답에서 텍스트 내용 추출
    * MCP 서버는 문자열을 직접 반환하므로, texts 배열이나 raw.content에서 추출
    */
@@ -351,6 +388,110 @@ export class ChatOrchestrationService {
   }
 
   /**
+   * MD 링크/이미지의 상대 경로를 절대 리소스 경로로 변환 (`../` 처리)
+   */
+  private resolveRelativeResourcePath(ref: string, docPath: string): string {
+    const raw = ref.trim().replace(/^<|>$/g, '').split(/[?#]/)[0];
+    if (!raw || /^https?:\/\//i.test(raw)) return raw;
+    if (raw.startsWith('/')) return raw.replace(/^\/+/, '');
+    const lastSlash = docPath.lastIndexOf('/');
+    const dir = lastSlash === -1 ? '' : docPath.slice(0, lastSlash + 1);
+    const combined = dir + raw;
+    const segments = combined.split('/').filter((s) => s.length > 0);
+    const out: string[] = [];
+    for (const s of segments) {
+      if (s === '..') out.pop();
+      else if (s !== '.') out.push(s);
+    }
+    return out.join('/');
+  }
+
+  /**
+   * 선별된 MD 본문에서 PDF/PNG 참조 경로 추출 (마크다운 링크, 이미지, `<document>`)
+   */
+  private extractPdfPngReferencesFromMarkdown(
+    content: string,
+    docPath: string,
+  ): Array<{ path: string; formats: string[] }> {
+    const results: Array<{ path: string; formats: string[] }> = [];
+    const seen = new Set<string>();
+    const add = (p: string, fmt: 'pdf' | 'png') => {
+      if (!p || seen.has(p)) return;
+      seen.add(p);
+      results.push({ path: p, formats: [fmt] });
+    };
+
+    const mdLink = /\[([^\]]*)\]\(([^)]+)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = mdLink.exec(content)) !== null) {
+      const inner = m[2].trim();
+      const raw = inner.split(/\s+/)[0];
+      if (/\.pdf$/i.test(raw)) {
+        const full = this.resolveRelativeResourcePath(raw, docPath);
+        if (!/^https?:\/\//i.test(full)) add(full, 'pdf');
+      }
+      if (/\.png$/i.test(raw)) {
+        const full = this.resolveRelativeResourcePath(raw, docPath);
+        if (!/^https?:\/\//i.test(full)) add(full, 'png');
+      }
+    }
+
+    for (const img of this.parseImageReferencesFromMarkdown(content)) {
+      const raw = img.trim().split(/[?#]/)[0];
+      if (/\.png$/i.test(raw)) {
+        const full = this.resolveRelativeResourcePath(raw, docPath);
+        if (!/^https?:\/\//i.test(full)) add(full, 'png');
+      }
+    }
+
+    for (const d of this.parseDocumentLinks(content)) {
+      const p = d.path.trim();
+      if (/\.pdf$/i.test(p)) {
+        const full = p.includes('/')
+          ? p
+          : this.resolveRelativeResourcePath(p, docPath);
+        if (!/^https?:\/\//i.test(full)) add(full, 'pdf');
+      }
+      if (/\.png$/i.test(p)) {
+        const full = p.includes('/')
+          ? p
+          : this.resolveRelativeResourcePath(p, docPath);
+        if (!/^https?:\/\//i.test(full)) add(full, 'png');
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * list_resources chunk 목록에서 선별된 상위 폴더와 같은 루트의 PDF/PNG chunk 경로 수집
+   */
+  private collectPdfPngPathsFromChunkCatalog(
+    chunks: Array<{ path: string }> | undefined,
+    selectedPaths: string[],
+    max: number = 8,
+  ): Array<{ path: string; formats: string[] }> {
+    if (!chunks?.length || !selectedPaths.length) return [];
+    const roots = new Set(
+      selectedPaths.map((p) => p.split('/')[0]).filter(Boolean),
+    );
+    const out: Array<{ path: string; formats: string[] }> = [];
+    const seen = new Set<string>();
+    for (const c of chunks) {
+      const isPdf = /\.pdf$/i.test(c.path);
+      const isPng = /\.png$/i.test(c.path);
+      if (!isPdf && !isPng) continue;
+      const root = c.path.split('/')[0];
+      if (!roots.has(root)) continue;
+      if (seen.has(c.path)) continue;
+      seen.add(c.path);
+      out.push({ path: c.path, formats: isPdf ? ['pdf'] : ['png'] });
+      if (out.length >= max) break;
+    }
+    return out;
+  }
+
+  /**
    * 질문과 관련된 하위 문서 찾기
    */
   private findRelevantSubDocuments(
@@ -523,10 +664,12 @@ export class ChatOrchestrationService {
 
   /**
    * 신 형식 list_resources: description 기반 chunk 선별 → get_resource(chunk_path) → 본문 수집
+   * @param catalogChunks 전체 chunk 목록(평탄화). PDF/PNG 전용 chunk를 FE 참조용으로 붙일 때 사용
    */
   private async fetchRelevantContentsFromChunks(
     question: string,
     resources: ListResourceItem[],
+    catalogChunks?: Array<{ path: string }>,
   ): Promise<{
     content: string;
     usedResources: Array<{ path: string; formats: string[] }>;
@@ -610,17 +753,43 @@ export class ChatOrchestrationService {
     }
 
     const contents: string[] = [];
-    const usedResources: Array<{ path: string; formats: string[] }> = [];
+    const mdUsed: Array<{ path: string; formats: string[] }> = [];
 
     for (const selected of selectedDocuments) {
       const doc = documentCandidates.find((d) => d.path === selected.path);
       if (doc) {
         contents.push(`\n\n## 리소스: ${doc.title}\n\n${doc.content}`);
-        usedResources.push({ path: doc.path, formats: ['md'] });
+        mdUsed.push({ path: doc.path, formats: ['md'] });
       }
     }
 
-    const finalUsedResources = usedResources.slice(0, 5);
+    const selectedPaths = selectedDocuments.map((s) => s.path);
+    const fromMarkdown: Array<{ path: string; formats: string[] }> = [];
+    for (const selected of selectedDocuments) {
+      const doc = documentCandidates.find((d) => d.path === selected.path);
+      if (!doc?.content) continue;
+      fromMarkdown.push(
+        ...this.extractPdfPngReferencesFromMarkdown(doc.content, doc.path),
+      );
+    }
+    const fromCatalog = this.collectPdfPngPathsFromChunkCatalog(
+      catalogChunks,
+      selectedPaths,
+      8,
+    );
+
+    const seenPdfPng = new Set<string>();
+    const pdfPngExtras: Array<{ path: string; formats: string[] }> = [];
+    for (const e of [...fromMarkdown, ...fromCatalog]) {
+      if (seenPdfPng.has(e.path)) continue;
+      seenPdfPng.add(e.path);
+      pdfPngExtras.push(e);
+    }
+
+    const finalUsedResources = [
+      ...mdUsed.slice(0, 5),
+      ...pdfPngExtras.slice(0, 8),
+    ];
 
     return {
       content: contents.join('\n'),
@@ -632,7 +801,7 @@ export class ChatOrchestrationService {
    * list_resources tool 응답에서 관련 리소스 내용 가져오기
    * - 신 형식(resources + chunks): description 보고 chunk 경로 선별 → get_resource(chunk_path)
    * - 구 형식(filteredResources): 경로만 선별 후 get_resource
-   * @returns 문서 내용과 실제 사용된 리소스 정보 (PDF/PNG만, 신 형식은 chunk path + md)
+   * @returns 문서 내용과 usedResources(선별 경로·formats; chunk는 md 포함). FE 참조 목록은 PDF/PNG만 노출.
    */
   private async fetchRelevantResourceContents(
     question: string,
@@ -651,6 +820,7 @@ export class ChatOrchestrationService {
       return this.fetchRelevantContentsFromChunks(
         question,
         listResult.resources!,
+        listResult.chunks,
       );
     }
 
@@ -956,40 +1126,16 @@ export class ChatOrchestrationService {
         }
       }
 
-      // 실제 사용된 리소스만 포함 (PDF/PNG만)
+      // 실제 사용된 리소스만 포함 (FE·SSE: 묶음 PDF만)
       const resources: ResourceInfo[] = [];
+      const seenFePdfPaths = new Set<string>();
       if (usedResourcesFromContent.length > 0) {
         for (const resource of usedResourcesFromContent) {
-          if (resource.path && resource.formats) {
-            // PDF 또는 PNG만 포함
-            const pdfPngFormats = resource.formats.filter(
-              (f) => f === 'pdf' || f === 'png',
-            );
-            if (pdfPngFormats.length > 0) {
-              const resourceUrl = this.generateResourceUrl(resource.path);
-              const documentTitle = this.extractDocumentTitle(
-                resource.path,
-                resource.path,
-                pdfPngFormats,
-              );
-              const pathLower = resource.path.toLowerCase();
-              const titleWithFormat = pathLower.endsWith('.png')
-                ? `${documentTitle} (PNG)`
-                : pathLower.endsWith('.pdf')
-                  ? `${documentTitle} (PDF)`
-                  : pdfPngFormats.includes('pdf')
-                    ? `${documentTitle} (PDF)`
-                    : pdfPngFormats.includes('png')
-                      ? `${documentTitle} (PNG)`
-                      : documentTitle;
-
-              resources.push({
-                path: titleWithFormat,
-                formats: pdfPngFormats,
-                url: resourceUrl,
-              });
-            }
-          }
+          this.appendFePdfResourceEntryFromUsed(
+            resources,
+            seenFePdfPaths,
+            resource,
+          );
         }
       }
 
@@ -1113,12 +1259,42 @@ export class ChatOrchestrationService {
         listResult.texts.join('\n') || JSON.stringify(listResult.raw, null, 2);
 
       // OpenRouter 입력 길이가 커지면 400이 발생할 수 있어, tool 호출 컨텐츠는 하드 캡을 둡니다.
+      // list_resources 원문은 매우 길 수 있어 목록만 줄이고, 선별 본문(relevantResult)은 잘리지 않게 합니다.
+      // 선별 본문을 앞에 두어(목록보다 앞) 모델이 문서를 우선 활용하도록 합니다.
       const MAX_TOOL_CONTENT_CHARS = 50000;
-      let fullContent = resultText + '\n\n' + relevantResult.content;
-      const fullContentOriginalChars = fullContent.length;
+      const separator = '\n\n';
+      const relevantPart = relevantResult.content;
+      const listPart = resultText;
+      const fullContentOriginalChars =
+        relevantPart.length + separator.length + listPart.length;
+
+      const maxListChars = Math.max(
+        0,
+        MAX_TOOL_CONTENT_CHARS - relevantPart.length - separator.length,
+      );
+      const LIST_TRUNCATION_NOTE =
+        '\n\n[Truncated: list_resources preview too long]';
+      let listPartForTool = listPart;
       let fullContentWasTruncated = false;
+      if (listPart.length > maxListChars) {
+        const maxSlice = Math.max(
+          0,
+          maxListChars - LIST_TRUNCATION_NOTE.length,
+        );
+        listPartForTool = listPart.slice(0, maxSlice) + LIST_TRUNCATION_NOTE;
+        fullContentWasTruncated = true;
+      }
+      let fullContent = relevantPart + separator + listPartForTool;
       if (fullContent.length > MAX_TOOL_CONTENT_CHARS) {
-        fullContent = `${fullContent.slice(0, MAX_TOOL_CONTENT_CHARS)}\n\n[Truncated: tool content too long]`;
+        const maxRel = Math.max(
+          0,
+          MAX_TOOL_CONTENT_CHARS - listPartForTool.length - separator.length,
+        );
+        fullContent =
+          relevantPart.slice(0, maxRel) +
+          '\n\n[Truncated: reference material too long]' +
+          separator +
+          listPartForTool;
         fullContentWasTruncated = true;
       }
 
@@ -1137,32 +1313,9 @@ export class ChatOrchestrationService {
 
       const allResources: ResourceInfo[] = [];
       console.log('relevantResult.usedResources', relevantResult.usedResources);
+      const seenFePdfPaths = new Set<string>();
       for (const r of relevantResult.usedResources) {
-        if (!r.path || !r.formats) continue;
-        const pdfPngFormats = r.formats.filter(
-          (f) => f === 'pdf' || f === 'png',
-        );
-        if (pdfPngFormats.length === 0) continue;
-        const documentTitle = this.extractDocumentTitle(
-          r.path,
-          r.path,
-          pdfPngFormats,
-        );
-        const pathLower = r.path.toLowerCase();
-        const titleWithFormat = pathLower.endsWith('.png')
-          ? `${documentTitle} (PNG)`
-          : pathLower.endsWith('.pdf')
-            ? `${documentTitle} (PDF)`
-            : pdfPngFormats.includes('pdf')
-              ? `${documentTitle} (PDF)`
-              : pdfPngFormats.includes('png')
-                ? `${documentTitle} (PNG)`
-                : documentTitle;
-        allResources.push({
-          path: titleWithFormat,
-          formats: pdfPngFormats,
-          url: this.generateResourceUrl(r.path),
-        });
+        this.appendFePdfResourceEntryFromUsed(allResources, seenFePdfPaths, r);
       }
 
       // 4. 최종 응답 스트리밍 (synthetic assistant tool_call + tool 메시지)
