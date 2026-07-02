@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Body,
   Query,
   Param,
@@ -16,6 +17,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiTags,
+  ApiBody,
   ApiOperation,
   ApiResponse,
   ApiQuery,
@@ -37,6 +39,10 @@ import { ChatMessageDto } from '../common/dto/chat-message.dto';
 import { PaginatedMessagesDto } from '../common/dto/paginated-messages.dto';
 import { ChatRequestDto } from './dto/chat-request.dto';
 import { MAX_QUESTIONS_PER_SESSION } from './constants';
+import {
+  MessageFeedbackDto,
+  MessageFeedbackInputDto,
+} from '../common/dto/message-feedback.dto';
 
 @ApiTags('Widget Messages')
 @Controller('api/v1/widget/messages')
@@ -124,6 +130,49 @@ export class ChatController {
       }
     }
     return this.chatService.createMessage(session.sessionId, dto);
+  }
+
+  @Put(':messageId/feedback')
+  @ApiOperation({
+    summary: 'assistant 답변 피드백 등록/변경',
+    description:
+      '현재 위젯 세션에 속한 assistant 답변에 대해 문제가 해결되었는지(GOOD/BAD)를 저장합니다. 같은 답변에는 현재 피드백 하나만 유지됩니다.',
+  })
+  @ApiParam({
+    name: 'messageId',
+    description: '피드백 대상 assistant 메시지 ID',
+    type: String,
+  })
+  @ApiBody({
+    type: MessageFeedbackInputDto,
+  })
+  @ApiResponse({
+    status: 200,
+    description: '피드백 저장 성공',
+    type: MessageFeedbackDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: '잘못된 rating 값 또는 assistant가 아닌 메시지',
+  })
+  @ApiResponse({
+    status: 401,
+    description: '인증 실패',
+  })
+  @ApiResponse({
+    status: 404,
+    description: '현재 세션에서 접근 가능한 메시지를 찾을 수 없음',
+  })
+  async upsertMessageFeedback(
+    @CurrentSession() session: SessionPayload,
+    @Param('messageId') messageId: string,
+    @Body() dto: MessageFeedbackInputDto,
+  ): Promise<MessageFeedbackDto> {
+    return this.chatService.upsertMessageFeedback(
+      session.sessionId,
+      messageId,
+      dto,
+    );
   }
 
   @Post('chat/stream')

@@ -50,6 +50,13 @@
       "when": 1773549888478,
       "tag": "0006_good_black_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783010423775,
+      "tag": "0007_past_silk_fever",
+      "breakpoints": true
     }
   ]
 }

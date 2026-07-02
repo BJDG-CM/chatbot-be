@@ -1,0 +1,13 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "..",
+  "testEnvironment": "node",
+  "testRegex": ".e2e-spec.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^@lib/infoteam-idp$": "<rootDir>/libs/infoteam-idp/src/index.ts",
+    "^@lib/infoteam-idp/(.*)$": "<rootDir>/libs/infoteam-idp/src/$1"
+  }
+}
