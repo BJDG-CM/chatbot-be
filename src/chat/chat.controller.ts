@@ -14,6 +14,7 @@ import {
   Logger,
   HttpException,
   HttpStatus,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -166,7 +167,7 @@ export class ChatController {
   })
   async upsertMessageFeedback(
     @CurrentSession() session: SessionPayload,
-    @Param('messageId') messageId: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
     @Body() dto: MessageFeedbackInputDto,
   ): Promise<MessageFeedbackDto> {
     return this.chatService.upsertMessageFeedback(
@@ -211,7 +212,7 @@ export class ChatController {
   })
   async regenerateBadFeedbackAnswer(
     @CurrentSession() session: SessionPayload,
-    @Param('messageId') messageId: string,
+    @Param('messageId', ParseUUIDPipe) messageId: string,
     @Req() req: FastifyRequest,
     @Res() reply: FastifyReply,
   ): Promise<void> {

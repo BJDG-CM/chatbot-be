@@ -174,14 +174,7 @@ export class ChatService {
       })
       .returning();
 
-    return {
-      id: newMessage.id,
-      role: newMessage.role as MessageRole,
-      content: newMessage.content,
-      metadata: (newMessage.metadata as Record<string, unknown>) || undefined,
-      feedback: null,
-      createdAt: newMessage.createdAt,
-    };
+    return this.toMessageDto(newMessage);
   }
 
   async upsertMessageFeedback(

@@ -103,24 +103,31 @@ describe('Chat feedback API (e2e)', () => {
     await app?.close();
   });
 
-  const injectFeedback = (payload: unknown, authorization = 'Bearer test') =>
+  const injectFeedback = (
+    payload: unknown,
+    authorization = 'Bearer test',
+    targetMessageId = messageId,
+  ) =>
     app!
       .getHttpAdapter()
       .getInstance()
       .inject({
         method: 'PUT',
-        url: `/api/v1/widget/messages/${messageId}/feedback`,
+        url: `/api/v1/widget/messages/${targetMessageId}/feedback`,
         headers: authorization ? { authorization } : {},
         payload,
       });
 
-  const injectRegeneration = (authorization = 'Bearer test') =>
+  const injectRegeneration = (
+    authorization = 'Bearer test',
+    targetMessageId = messageId,
+  ) =>
     app!
       .getHttpAdapter()
       .getInstance()
       .inject({
         method: 'POST',
-        url: `/api/v1/widget/messages/${messageId}/regenerate/stream`,
+        url: `/api/v1/widget/messages/${targetMessageId}/regenerate/stream`,
         headers: authorization ? { authorization } : {},
       });
 
@@ -170,6 +177,17 @@ describe('Chat feedback API (e2e)', () => {
     expect(JSON.parse(response.payload).rating).toBe(FeedbackRating.BAD);
   });
 
+  it('rejects invalid feedback message IDs before hitting the service', async () => {
+    const response = await injectFeedback(
+      { rating: FeedbackRating.BAD },
+      'Bearer test',
+      'not-a-uuid',
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(chatService.upsertMessageFeedback).not.toHaveBeenCalled();
+  });
+
   it('regenerates a BAD feedback answer without consuming the question limit', async () => {
     chatService.getAnswerRegenerationTarget.mockResolvedValueOnce({
       question: 'original question',
@@ -204,6 +222,16 @@ describe('Chat feedback API (e2e)', () => {
         },
       },
     );
+  });
+
+  it('rejects invalid regeneration message IDs before hitting the service', async () => {
+    const response = await injectRegeneration('Bearer test', 'not-a-uuid');
+
+    expect(response.statusCode).toBe(400);
+    expect(chatService.getAnswerRegenerationTarget).not.toHaveBeenCalled();
+    expect(
+      chatOrchestrationService.handleStreamingResponse,
+    ).not.toHaveBeenCalled();
   });
 
   it('rejects unauthenticated feedback requests', async () => {
