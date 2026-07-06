@@ -9,7 +9,7 @@ import {
   widgetKeys,
   widgetKeyCollaborators,
 } from '../db';
-import { eq, sql, and, inArray, gte, lte, lt, ne } from 'drizzle-orm';
+import { eq, sql, and, inArray, gte, lte, lt, ne, count } from 'drizzle-orm';
 import { getSourceFromPageUrl } from '../common/utils/domain-validator.util';
 import {
   WidgetKeyStatsDto,
@@ -200,23 +200,35 @@ export class UsageService {
       .from(usageDaily)
       .where(and(...usageConditions));
 
+    const normalizedSessionSource = sql<string>`
+      case
+        when btrim(${sessions.pageUrl}) = '' then 'unknown'
+        when btrim(${sessions.pageUrl}) like 'app:%' then coalesce(nullif(btrim(substring(btrim(${sessions.pageUrl}) from 5)), ''), 'unknown')
+        when btrim(${sessions.pageUrl}) ~* '^[a-z][a-z0-9+.-]*://' then coalesce(nullif(split_part(regexp_replace(btrim(${sessions.pageUrl}), '^[a-z][a-z0-9+.-]*://([^/\\?#]+).*$', '\\1', 'i'), ':', 1), ''), 'unknown')
+        else coalesce(nullif(regexp_replace(btrim(${sessions.pageUrl}), '^(?:https?://)?([^/\\?#]+).*$', '\\1', 'i'), ''), 'unknown')
+      end
+    `;
+    const answerConditions = [
+      inArray(sessions.widgetKeyId, keyIds),
+      eq(messages.role, 'assistant'),
+      gte(messages.createdAt, startDateTime),
+      lt(messages.createdAt, endExclusive),
+    ];
+    if (options.domain) {
+      answerConditions.push(eq(normalizedSessionSource, options.domain));
+    }
+
     const answerRows = await this.db
       .select({
         widgetKeyId: sessions.widgetKeyId,
-        pageUrl: sessions.pageUrl,
-        feedback: messageFeedbacks.rating,
+        answers: count(messages.id),
+        badAnswers: sql<number>`count(case when ${messageFeedbacks.rating} = 'BAD' then 1 end)`,
       })
       .from(messages)
       .innerJoin(sessions, eq(messages.sessionId, sessions.id))
       .leftJoin(messageFeedbacks, eq(messageFeedbacks.messageId, messages.id))
-      .where(
-        and(
-          inArray(sessions.widgetKeyId, keyIds),
-          eq(messages.role, 'assistant'),
-          gte(messages.createdAt, startDateTime),
-          lt(messages.createdAt, endExclusive),
-        ),
-      );
+      .where(and(...answerConditions))
+      .groupBy(sessions.widgetKeyId);
 
     const byKey = new Map<
       string,
@@ -261,22 +273,13 @@ export class UsageService {
     }
 
     for (const r of answerRows) {
-      if (
-        options.domain &&
-        getSourceFromPageUrl(r.pageUrl) !== options.domain
-      ) {
-        continue;
-      }
-
       const agg = byKey.get(r.widgetKeyId);
       if (!agg) {
         continue;
       }
 
-      agg.answers += 1;
-      if (r.feedback === 'BAD') {
-        agg.badAnswers += 1;
-      }
+      agg.answers += Number(r.answers ?? 0);
+      agg.badAnswers += Number(r.badAnswers ?? 0);
     }
 
     const result: WidgetKeyStatsDto[] = [];
