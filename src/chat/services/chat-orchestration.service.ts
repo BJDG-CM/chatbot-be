@@ -37,6 +37,15 @@ export interface ResourceInfo {
   url: string;
 }
 
+interface ProcessUserQuestionStreamOptions {
+  persistUserMessage?: boolean;
+  historyBefore?: Date;
+}
+
+interface StreamingResponseOptions extends ProcessUserQuestionStreamOptions {
+  assistantMetadata?: Record<string, unknown>;
+}
+
 /**
  * 채팅 오케스트레이션 서비스
  * 사용자 질문을 받아 LLM과 MCP Tool을 조합하여 답변을 생성합니다.
@@ -1160,6 +1169,7 @@ export class ChatOrchestrationService {
   async processUserQuestionStream(
     sessionId: string,
     userQuestion: string,
+    options: ProcessUserQuestionStreamOptions = {},
   ): Promise<{
     stream: Readable;
     resources: ResourceInfo[];
@@ -1169,20 +1179,24 @@ export class ChatOrchestrationService {
     try {
       // 0. 과거 대화 조회 (현재 user 저장 전 → 직전 대화까지 context)
       let t0 = Date.now();
-      const pastMessagesRaw =
-        await this.chatService.getMessagesForContext(sessionId);
+      const pastMessagesRaw = await this.chatService.getMessagesForContext(
+        sessionId,
+        options.historyBefore,
+      );
       const historyMessages: OpenRouterMessage[] = [...pastMessagesRaw]
         .reverse()
         .map((msg) => ({ role: msg.role, content: msg.content }));
       this.logger.log(`[PERF] getMessagesForContext: ${Date.now() - t0}ms`);
 
       // 1. 사용자 메시지 저장
-      t0 = Date.now();
-      await this.chatService.createMessage(sessionId, {
-        role: MessageRole.USER,
-        content: userQuestion,
-      });
-      this.logger.log(`[PERF] createMessage(user): ${Date.now() - t0}ms`);
+      if (options.persistUserMessage ?? true) {
+        t0 = Date.now();
+        await this.chatService.createMessage(sessionId, {
+          role: MessageRole.USER,
+          content: userQuestion,
+        });
+        this.logger.log(`[PERF] createMessage(user): ${Date.now() - t0}ms`);
+      }
 
       // 2. list_resources 직접 호출 (도구 선택 LLM 없이)
       t0 = Date.now();
@@ -1398,6 +1412,7 @@ export class ChatOrchestrationService {
     userQuestion: string,
     reply: FastifyReply,
     req: FastifyRequest,
+    options: StreamingResponseOptions = {},
   ): Promise<void> {
     reply.hijack();
 
@@ -1423,7 +1438,11 @@ export class ChatOrchestrationService {
 
     try {
       const { stream, resources } = await this.mcpClientService.withSession(
-        () => this.processUserQuestionStream(sessionId, userQuestion),
+        () =>
+          this.processUserQuestionStream(sessionId, userQuestion, {
+            persistUserMessage: options.persistUserMessage,
+            historyBefore: options.historyBefore,
+          }),
       );
 
       let accumulatedContent = '';
@@ -1483,6 +1502,7 @@ export class ChatOrchestrationService {
                 role: MessageRole.ASSISTANT,
                 content: accumulatedContent,
                 metadata: {
+                  ...(options.assistantMetadata ?? {}),
                   model: model || undefined,
                   usage: usage || undefined,
                   resources: resources.length > 0 ? resources : undefined,

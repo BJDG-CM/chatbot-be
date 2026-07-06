@@ -10,7 +10,7 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
-import type { FastifyRequest } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ChatController } from '../src/chat/chat.controller';
 import { ChatService } from '../src/chat/services/chat.service';
 import { ChatOrchestrationService } from '../src/chat/services/chat-orchestration.service';
@@ -48,6 +48,10 @@ describe('Chat feedback API (e2e)', () => {
     createMessage: jest.fn(),
     getUserMessageCount: jest.fn(),
     upsertMessageFeedback: jest.fn(),
+    getAnswerRegenerationTarget: jest.fn(),
+  };
+  const chatOrchestrationService = {
+    handleStreamingResponse: jest.fn(),
   };
 
   beforeAll(async () => {
@@ -57,7 +61,7 @@ describe('Chat feedback API (e2e)', () => {
         { provide: ChatService, useValue: chatService },
         {
           provide: ChatOrchestrationService,
-          useValue: { handleStreamingResponse: jest.fn() },
+          useValue: chatOrchestrationService,
         },
         { provide: McpResourceService, useValue: { getResource: jest.fn() } },
       ],
@@ -110,6 +114,26 @@ describe('Chat feedback API (e2e)', () => {
         payload,
       });
 
+  const injectRegeneration = (authorization = 'Bearer test') =>
+    app!
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/api/v1/widget/messages/${messageId}/regenerate/stream`,
+        headers: authorization ? { authorization } : {},
+      });
+
+  const streamDone = async (
+    _sessionId: string,
+    _question: string,
+    reply: FastifyReply,
+  ): Promise<void> => {
+    reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    reply.raw.write('data: [DONE]\n\n');
+    reply.raw.end();
+  };
+
   it('accepts GOOD feedback with widget session authentication', async () => {
     chatService.upsertMessageFeedback.mockResolvedValueOnce({
       messageId,
@@ -144,6 +168,42 @@ describe('Chat feedback API (e2e)', () => {
 
     expect(response.statusCode).toBe(200);
     expect(JSON.parse(response.payload).rating).toBe(FeedbackRating.BAD);
+  });
+
+  it('regenerates a BAD feedback answer without consuming the question limit', async () => {
+    chatService.getAnswerRegenerationTarget.mockResolvedValueOnce({
+      question: 'original question',
+      originalMessageId: messageId,
+      historyBefore: createdAt,
+    });
+    chatOrchestrationService.handleStreamingResponse.mockImplementationOnce(
+      streamDone,
+    );
+
+    const response = await injectRegeneration();
+
+    expect(response.statusCode).toBe(200);
+    expect(chatService.getAnswerRegenerationTarget).toHaveBeenCalledWith(
+      'session-1',
+      messageId,
+    );
+    expect(chatService.getUserMessageCount).not.toHaveBeenCalled();
+    expect(
+      chatOrchestrationService.handleStreamingResponse,
+    ).toHaveBeenCalledWith(
+      'session-1',
+      'original question',
+      expect.anything(),
+      expect.anything(),
+      {
+        persistUserMessage: false,
+        historyBefore: createdAt,
+        assistantMetadata: {
+          regeneratedFromMessageId: messageId,
+          regeneratedFromFeedback: FeedbackRating.BAD,
+        },
+      },
+    );
   });
 
   it('rejects unauthenticated feedback requests', async () => {

@@ -40,6 +40,7 @@ import { PaginatedMessagesDto } from '../common/dto/paginated-messages.dto';
 import { ChatRequestDto } from './dto/chat-request.dto';
 import { MAX_QUESTIONS_PER_SESSION } from './constants';
 import {
+  FeedbackRating,
   MessageFeedbackDto,
   MessageFeedbackInputDto,
 } from '../common/dto/message-feedback.dto';
@@ -172,6 +173,66 @@ export class ChatController {
       session.sessionId,
       messageId,
       dto,
+    );
+  }
+
+  @Post(':messageId/regenerate/stream')
+  @ApiOperation({
+    summary: 'BAD 피드백 답변 1회 재생성',
+    description:
+      'BAD 피드백이 저장된 assistant 답변에 대해 직전 사용자 질문으로 답변을 한 번만 재생성합니다. 재생성은 세션 질문 횟수 제한에 포함되지 않습니다.',
+  })
+  @ApiParam({
+    name: 'messageId',
+    description: 'BAD 피드백을 받은 assistant 메시지 ID',
+    type: String,
+  })
+  @ApiResponse({
+    status: 200,
+    description: '재생성 스트리밍 시작 (text/event-stream)',
+    headers: {
+      'Content-Type': {
+        description: 'text/event-stream',
+        schema: { type: 'string' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'BAD 피드백이 아니거나 이미 재생성된 답변',
+  })
+  @ApiResponse({
+    status: 401,
+    description: '인증 실패',
+  })
+  @ApiResponse({
+    status: 404,
+    description: '현재 세션에서 접근 가능한 메시지 또는 원본 질문을 찾을 수 없음',
+  })
+  async regenerateBadFeedbackAnswer(
+    @CurrentSession() session: SessionPayload,
+    @Param('messageId') messageId: string,
+    @Req() req: FastifyRequest,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const target = await this.chatService.getAnswerRegenerationTarget(
+      session.sessionId,
+      messageId,
+    );
+
+    return this.chatOrchestrationService.handleStreamingResponse(
+      session.sessionId,
+      target.question,
+      reply,
+      req,
+      {
+        persistUserMessage: false,
+        historyBefore: target.historyBefore,
+        assistantMetadata: {
+          regeneratedFromMessageId: target.originalMessageId,
+          regeneratedFromFeedback: FeedbackRating.BAD,
+        },
+      },
     );
   }
 

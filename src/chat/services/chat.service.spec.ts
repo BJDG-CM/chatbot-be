@@ -158,9 +158,22 @@ const createService = (): { service: ChatService; db: FakeDb } => {
 describe('ChatService feedback', () => {
   const sessionId = 'session-1';
   const messageId = 'message-1';
+  const createdAt = new Date('2026-07-03T00:00:00.000Z');
 
   const queueAssistantMessage = (db: FakeDb): void => {
     db.queueSelect([{ id: messageId, role: MessageRole.ASSISTANT }]);
+  };
+
+  const queueBadFeedbackTarget = (db: FakeDb): void => {
+    db.queueSelect([
+      {
+        id: messageId,
+        role: MessageRole.ASSISTANT,
+        createdAt,
+        metadata: null,
+        feedback: FeedbackRating.BAD,
+      },
+    ]);
   };
 
   it('creates GOOD feedback for an assistant answer', async () => {
@@ -291,7 +304,6 @@ describe('ChatService feedback', () => {
 
   it('includes feedback values when chat history is read', async () => {
     const { service, db } = createService();
-    const createdAt = new Date('2026-07-03T00:00:00.000Z');
     db.queueSelect([
       {
         message: {
@@ -329,5 +341,78 @@ describe('ChatService feedback', () => {
         feedback: null,
       }),
     ]);
+  });
+
+  it('finds the original question for a BAD feedback answer regeneration', async () => {
+    const { service, db } = createService();
+    queueBadFeedbackTarget(db);
+    db.queueSelect([]);
+    db.queueSelect([{ content: 'original question', createdAt }]);
+
+    const result = await service.getAnswerRegenerationTarget(
+      sessionId,
+      messageId,
+    );
+
+    expect(result).toEqual({
+      question: 'original question',
+      originalMessageId: messageId,
+      historyBefore: createdAt,
+    });
+  });
+
+  it('rejects regeneration unless the answer has BAD feedback', async () => {
+    const { service, db } = createService();
+    db.queueSelect([
+      {
+        id: messageId,
+        role: MessageRole.ASSISTANT,
+        createdAt,
+        metadata: null,
+        feedback: FeedbackRating.GOOD,
+      },
+    ]);
+
+    await expect(
+      service.getAnswerRegenerationTarget(sessionId, messageId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects regeneration for an answer that has already been regenerated', async () => {
+    const { service, db } = createService();
+    queueBadFeedbackTarget(db);
+    db.queueSelect([{ id: 'regenerated-message' }]);
+
+    await expect(
+      service.getAnswerRegenerationTarget(sessionId, messageId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects regenerating a regenerated answer again', async () => {
+    const { service, db } = createService();
+    db.queueSelect([
+      {
+        id: messageId,
+        role: MessageRole.ASSISTANT,
+        createdAt,
+        metadata: { regeneratedFromMessageId: 'original-message' },
+        feedback: FeedbackRating.BAD,
+      },
+    ]);
+
+    await expect(
+      service.getAnswerRegenerationTarget(sessionId, messageId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects regeneration when the original user question cannot be found', async () => {
+    const { service, db } = createService();
+    queueBadFeedbackTarget(db);
+    db.queueSelect([]);
+    db.queueSelect([]);
+
+    await expect(
+      service.getAnswerRegenerationTarget(sessionId, messageId),
+    ).rejects.toBeInstanceOf(NotFoundException);
   });
 });
