@@ -77,6 +77,34 @@ export class ChatService {
     };
   }
 
+  private firstRawRow(rows: unknown): Record<string, unknown> | null {
+    const raw = Array.isArray(rows)
+      ? rows[0]
+      : (rows as { rows?: unknown[] }).rows?.[0];
+
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+
+    return raw as Record<string, unknown>;
+  }
+
+  private toMetadataRecord(metadata: unknown): Record<string, unknown> | null {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return null;
+    }
+
+    return metadata as Record<string, unknown>;
+  }
+
+  private toDate(value: unknown): Date {
+    if (value instanceof Date) {
+      return value;
+    }
+
+    return new Date(String(value));
+  }
+
   async getUserMessageCount(sessionId: string): Promise<number> {
     const [row] = await this.db
       .select({ count: count() })
@@ -228,79 +256,94 @@ export class ChatService {
     sessionId: string,
     messageId: string,
   ): Promise<AnswerRegenerationTarget> {
-    const [target] = await this.db
-      .select({
-        id: messages.id,
-        role: messages.role,
-        createdAt: messages.createdAt,
-        metadata: messages.metadata,
-        feedback: messageFeedbacks.rating,
-      })
-      .from(messages)
-      .leftJoin(messageFeedbacks, eq(messageFeedbacks.messageId, messages.id))
-      .where(and(eq(messages.id, messageId), eq(messages.sessionId, sessionId)))
-      .limit(1);
-
-    if (!target) {
-      throw new NotFoundException('Message not found');
-    }
-
-    if (target.role !== 'assistant') {
-      throw new BadRequestException(
-        'Regeneration is only available for assistant messages',
+    return this.db.transaction(async (tx) => {
+      const target = this.firstRawRow(
+        await tx.execute(sql`
+          SELECT m.id, m.role, m.created_at, m.metadata, f.rating
+          FROM messages m
+          LEFT JOIN message_feedbacks f ON f.message_id = m.id
+          WHERE m.id = ${messageId} AND m.session_id = ${sessionId}
+          FOR UPDATE OF m
+        `),
       );
-    }
 
-    if (target.feedback !== FeedbackRating.BAD) {
-      throw new BadRequestException(
-        'Regeneration is only available after BAD feedback',
+      if (!target) {
+        throw new NotFoundException('Message not found');
+      }
+
+      if (target.role !== 'assistant') {
+        throw new BadRequestException(
+          'Regeneration is only available for assistant messages',
+        );
+      }
+
+      const rating = target.rating ?? target.feedback;
+      if (rating !== FeedbackRating.BAD) {
+        throw new BadRequestException(
+          'Regeneration is only available after BAD feedback',
+        );
+      }
+
+      const metadata = this.toMetadataRecord(target.metadata);
+      if (
+        metadata?.regeneratedFromMessageId ||
+        metadata?.regenerationClaimedAt
+      ) {
+        throw new BadRequestException(
+          'Regenerated answers cannot be regenerated again',
+        );
+      }
+
+      const [existingRegeneration] = await tx
+        .select({ id: messages.id })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.sessionId, sessionId),
+            eq(messages.role, 'assistant'),
+            sql`${messages.metadata}->>'regeneratedFromMessageId' = ${messageId}`,
+          ),
+        )
+        .limit(1);
+
+      if (existingRegeneration) {
+        throw new BadRequestException('Answer has already been regenerated');
+      }
+
+      const targetCreatedAt = this.toDate(
+        target.created_at ?? target.createdAt,
       );
-    }
+      const [previousUserMessage] = await tx
+        .select({ content: messages.content, createdAt: messages.createdAt })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.sessionId, sessionId),
+            eq(messages.role, 'user'),
+            lte(messages.createdAt, targetCreatedAt),
+          ),
+        )
+        .orderBy(desc(messages.createdAt))
+        .limit(1);
 
-    const metadata = target.metadata as Record<string, unknown> | null;
-    if (metadata?.regeneratedFromMessageId) {
-      throw new BadRequestException(
-        'Regenerated answers cannot be regenerated again',
-      );
-    }
+      if (!previousUserMessage) {
+        throw new NotFoundException('Original user question not found');
+      }
 
-    const [existingRegeneration] = await this.db
-      .select({ id: messages.id })
-      .from(messages)
-      .where(
-        and(
-          eq(messages.sessionId, sessionId),
-          eq(messages.role, 'assistant'),
-          sql`${messages.metadata}->>'regeneratedFromMessageId' = ${messageId}`,
-        ),
-      )
-      .limit(1);
+      await tx.execute(sql`
+        UPDATE messages
+        SET metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+          'regenerationClaimedAt',
+          ${new Date().toISOString()}
+        )
+        WHERE id = ${messageId}
+      `);
 
-    if (existingRegeneration) {
-      throw new BadRequestException('Answer has already been regenerated');
-    }
-
-    const [previousUserMessage] = await this.db
-      .select({ content: messages.content, createdAt: messages.createdAt })
-      .from(messages)
-      .where(
-        and(
-          eq(messages.sessionId, sessionId),
-          eq(messages.role, 'user'),
-          lte(messages.createdAt, target.createdAt),
-        ),
-      )
-      .orderBy(desc(messages.createdAt))
-      .limit(1);
-
-    if (!previousUserMessage) {
-      throw new NotFoundException('Original user question not found');
-    }
-
-    return {
-      question: previousUserMessage.content,
-      originalMessageId: messageId,
-      historyBefore: previousUserMessage.createdAt,
-    };
+      return {
+        question: previousUserMessage.content,
+        originalMessageId: messageId,
+        historyBefore: previousUserMessage.createdAt,
+      };
+    });
   }
 }

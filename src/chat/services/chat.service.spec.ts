@@ -84,6 +84,7 @@ class InsertBuilder {
 
 class FakeDb {
   readonly feedbackRows: MessageFeedback[] = [];
+  executeCalls = 0;
   insertError: Error | null = null;
   returnEmptyFeedbackInsert = false;
   private readonly selectQueue: unknown[][] = [];
@@ -95,6 +96,15 @@ class FakeDb {
 
   select(_selection?: unknown): SelectBuilder<unknown> {
     return new SelectBuilder(this.selectQueue.shift() ?? []);
+  }
+
+  execute(_query: unknown): Promise<unknown[]> {
+    this.executeCalls += 1;
+    return Promise.resolve(this.selectQueue.shift() ?? []);
+  }
+
+  transaction<T>(callback: (tx: this) => Promise<T>): Promise<T> {
+    return callback(this);
   }
 
   insert(table: unknown): InsertBuilder {
@@ -359,6 +369,7 @@ describe('ChatService feedback', () => {
       originalMessageId: messageId,
       historyBefore: createdAt,
     });
+    expect(db.executeCalls).toBe(2);
   });
 
   it('rejects regeneration unless the answer has BAD feedback', async () => {
@@ -396,6 +407,23 @@ describe('ChatService feedback', () => {
         role: MessageRole.ASSISTANT,
         createdAt,
         metadata: { regeneratedFromMessageId: 'original-message' },
+        feedback: FeedbackRating.BAD,
+      },
+    ]);
+
+    await expect(
+      service.getAnswerRegenerationTarget(sessionId, messageId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects regeneration when the original answer is already claimed', async () => {
+    const { service, db } = createService();
+    db.queueSelect([
+      {
+        id: messageId,
+        role: MessageRole.ASSISTANT,
+        createdAt,
+        metadata: { regenerationClaimedAt: '2026-07-03T00:00:00.000Z' },
         feedback: FeedbackRating.BAD,
       },
     ]);
