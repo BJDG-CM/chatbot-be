@@ -1488,12 +1488,15 @@ export class ChatOrchestrationService {
     });
 
     try {
-      const { stream, resources } = await this.mcpClientService.withSession(
-        () =>
-          this.processUserQuestionStream(sessionId, userQuestion, {
-            persistUserMessage: options.persistUserMessage,
-            historyBefore: options.historyBefore,
-          }),
+      const {
+        stream,
+        resources,
+        usage: reasoningUsage,
+      } = await this.mcpClientService.withSession(() =>
+        this.processUserQuestionStream(sessionId, userQuestion, {
+          persistUserMessage: options.persistUserMessage,
+          historyBefore: options.historyBefore,
+        }),
       );
 
       let accumulatedContent = '';
