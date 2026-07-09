@@ -101,7 +101,7 @@ export class EnvironmentVariables {
   // Open Router Configuration
   @IsString()
   @IsNotEmpty()
-  OPEN_ROUTER_API_KEY: string;
+  LETSUR_AI_GATEWAY_API_KEY: string;
 
   // Client Domain Configuration
   @IsString()

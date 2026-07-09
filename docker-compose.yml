@@ -51,9 +51,9 @@ services:
       MCP_BASE_URL: ${MCP_BASE_URL:-}
       MCP_RESOURCE_API_URL: ${MCP_RESOURCE_API_URL:-}
       # Open Router Configuration (optional)
-      OPEN_ROUTER_API_KEY: ${OPEN_ROUTER_API_KEY:-}
-      OPEN_ROUTER_MODEL: ${OPEN_ROUTER_MODEL:-}
-      OPEN_ROUTER_X_TITLE: ${OPEN_ROUTER_X_TITLE:-}
+      LETSUR_AI_GATEWAY_API_KEY: ${LETSUR_AI_GATEWAY_API_KEY:-}
+      LETSUR_AI_GATEWAY_MODEL: ${LETSUR_AI_GATEWAY_MODEL:-}
+      LETSUR_AI_GATEWAY_X_TITLE: ${LETSUR_AI_GATEWAY_X_TITLE:-}
     depends_on:
       postgres:
         condition: service_healthy

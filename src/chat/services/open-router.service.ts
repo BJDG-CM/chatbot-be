@@ -41,16 +41,16 @@ export class OpenRouterService {
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {
-    this.apiKey = this.configService.getOrThrow<string>('OPEN_ROUTER_API_KEY');
+    this.apiKey = this.configService.getOrThrow<string>('LETSUR_AI_GATEWAY_API_KEY');
     const fallback =
-      this.configService.get<string>('OPEN_ROUTER_MODEL') ||
+      this.configService.get<string>('LETSUR_AI_GATEWAY_MODEL') ||
       'anthropic/claude-3.5-sonnet';
     this.modelLight =
-      this.configService.get<string>('OPEN_ROUTER_MODEL_LIGHT') || fallback;
+      this.configService.get<string>('LETSUR_AI_GATEWAY_MODEL_LIGHT') || fallback;
     this.modelNormal =
-      this.configService.get<string>('OPEN_ROUTER_MODEL_NORMAL') || fallback;
+      this.configService.get<string>('LETSUR_AI_GATEWAY_MODEL_NORMAL') || fallback;
     this.modelHeavy =
-      this.configService.get<string>('OPEN_ROUTER_MODEL_HEAVY') || fallback;
+      this.configService.get<string>('LETSUR_AI_GATEWAY_MODEL_HEAVY') || fallback;
     this.defaultModel = this.modelNormal;
   }
 
@@ -213,7 +213,7 @@ ${params}`;
                 Authorization: `Bearer ${this.apiKey}`,
                 'Content-Type': 'application/json',
                 'HTTP-Referer': this.configService.get<string>('DOMAIN_NAME'),
-                'X-Title': this.configService.get<string>('OPEN_ROUTER_TITLE'),
+                'X-Title': this.configService.get<string>('LETSUR_AI_GATEWAY_TITLE'),
               },
               timeout: 15000,
             },
@@ -487,7 +487,7 @@ ${params}`;
                 Authorization: `Bearer ${this.apiKey}`,
                 'Content-Type': 'application/json',
                 'HTTP-Referer': this.configService.get<string>('DOMAIN_NAME'),
-                'X-Title': this.configService.get<string>('OPEN_ROUTER_TITLE'),
+                'X-Title': this.configService.get<string>('LETSUR_AI_GATEWAY_TITLE'),
               },
               timeout: 15000,
             },
