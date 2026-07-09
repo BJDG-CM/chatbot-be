@@ -2,12 +2,14 @@ import { Injectable, Inject, Logger } from '@nestjs/common';
 import {
   DB_CONNECTION,
   type Database,
+  messageFeedbacks,
+  messages,
   sessions,
   usageDaily,
   widgetKeys,
   widgetKeyCollaborators,
 } from '../db';
-import { eq, sql, and, inArray, gte, lte, ne } from 'drizzle-orm';
+import { eq, sql, and, inArray, gte, lte, lt, ne, count } from 'drizzle-orm';
 import { getSourceFromPageUrl } from '../common/utils/domain-validator.util';
 import {
   WidgetKeyStatsDto,
@@ -32,6 +34,18 @@ export interface GetWidgetKeyUsageOptions {
 function maskWidgetKey(secretKey: string): string {
   if (secretKey.length <= 10) return '***';
   return secretKey.slice(0, 7) + '***' + secretKey.slice(-3);
+}
+
+export function calculateResolutionRate(
+  totalAnswers: number,
+  badAnswers: number,
+): number {
+  if (totalAnswers <= 0) {
+    return 0;
+  }
+
+  const rate = (1 - badAnswers / totalAnswers) * 100;
+  return Math.round(rate * 100) / 100;
 }
 
 @Injectable()
@@ -100,6 +114,9 @@ export class UsageService {
       : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
     const startStr = start.toISOString().slice(0, 10);
     const endStr = end.toISOString().slice(0, 10);
+    const startDateTime = new Date(`${startStr}T00:00:00.000Z`);
+    const endExclusive = new Date(`${endStr}T00:00:00.000Z`);
+    endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
 
     // 소유 키 ID 목록
     const ownedKeys = await this.db
@@ -183,12 +200,43 @@ export class UsageService {
       .from(usageDaily)
       .where(and(...usageConditions));
 
-    const keyMap = new Map(keys.map((k) => [k.id, k]));
+    const normalizedSessionSource = sql<string>`
+      case
+        when btrim(${sessions.pageUrl}) = '' then 'unknown'
+        when btrim(${sessions.pageUrl}) like 'app:%' then coalesce(nullif(btrim(substring(btrim(${sessions.pageUrl}) from 5)), ''), 'unknown')
+        when btrim(${sessions.pageUrl}) ~* '^[a-z][a-z0-9+.-]*://' then coalesce(nullif(split_part(regexp_replace(btrim(${sessions.pageUrl}), '^[a-z][a-z0-9+.-]*://([^/\\?#]+).*$', '\\1', 'i'), ':', 1), ''), 'unknown')
+        else coalesce(nullif(regexp_replace(btrim(${sessions.pageUrl}), '^(?:https?://)?([^/\\?#]+).*$', '\\1', 'i'), ''), 'unknown')
+      end
+    `;
+    const answerConditions = [
+      inArray(sessions.widgetKeyId, keyIds),
+      eq(messages.role, 'assistant'),
+      gte(messages.createdAt, startDateTime),
+      lt(messages.createdAt, endExclusive),
+    ];
+    if (options.domain) {
+      answerConditions.push(eq(normalizedSessionSource, options.domain));
+    }
+
+    const answerRows = await this.db
+      .select({
+        widgetKeyId: sessions.widgetKeyId,
+        answers: count(messages.id),
+        badAnswers: sql<number>`count(case when ${messageFeedbacks.rating} = 'BAD' then 1 end)`,
+      })
+      .from(messages)
+      .innerJoin(sessions, eq(messages.sessionId, sessions.id))
+      .leftJoin(messageFeedbacks, eq(messageFeedbacks.messageId, messages.id))
+      .where(and(...answerConditions))
+      .groupBy(sessions.widgetKeyId);
+
     const byKey = new Map<
       string,
       {
         tokens: number;
         requests: number;
+        answers: number;
+        badAnswers: number;
         byDate: Map<string, { tokens: number; requests: number }>;
         byDomain: Map<string, { tokens: number; requests: number }>;
       }
@@ -198,6 +246,8 @@ export class UsageService {
       byKey.set(k.id, {
         tokens: 0,
         requests: 0,
+        answers: 0,
+        badAnswers: 0,
         byDate: new Map(),
         byDomain: new Map(),
       });
@@ -220,6 +270,16 @@ export class UsageService {
       domainEntry.tokens += r.totalTokens;
       domainEntry.requests += r.totalRequests;
       agg.byDomain.set(r.domain, domainEntry);
+    }
+
+    for (const r of answerRows) {
+      const agg = byKey.get(r.widgetKeyId);
+      if (!agg) {
+        continue;
+      }
+
+      agg.answers += Number(r.answers ?? 0);
+      agg.badAnswers += Number(r.badAnswers ?? 0);
     }
 
     const result: WidgetKeyStatsDto[] = [];
@@ -245,6 +305,7 @@ export class UsageService {
         widgetKey: maskWidgetKey(k.secretKey),
         totalTokens: agg.tokens,
         totalRequests: agg.requests,
+        resolutionRate: calculateResolutionRate(agg.answers, agg.badAnswers),
         usageData,
         domainStats,
       });

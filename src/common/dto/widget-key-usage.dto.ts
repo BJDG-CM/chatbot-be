@@ -64,6 +64,13 @@ export class WidgetKeyStatsDto {
   totalRequests: number;
 
   @ApiProperty({
+    description:
+      '문제 해결률. (1 - BAD 피드백 답변 수 / 전체 생성 답변 수) * 100',
+    example: 92.5,
+  })
+  resolutionRate: number;
+
+  @ApiProperty({
     description: '날짜별 시계열 데이터',
     type: [UsageDataDto],
   })

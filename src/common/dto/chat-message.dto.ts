@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { MessageRole } from './chat-message-input.dto';
+import { FeedbackRating } from './message-feedback.dto';
 
 export class ChatMessageDto {
   @ApiProperty({
@@ -26,6 +27,15 @@ export class ChatMessageDto {
     example: { tokens: 150, model: 'gpt-4' },
   })
   metadata?: Record<string, any>;
+
+  @ApiProperty({
+    description:
+      'assistant 답변의 현재 문제 해결 여부 피드백. 피드백이 없거나 대상이 아니면 null입니다.',
+    enum: FeedbackRating,
+    nullable: true,
+    example: FeedbackRating.GOOD,
+  })
+  feedback: FeedbackRating | null;
 
   @ApiProperty({
     description: '메시지 생성 일시',

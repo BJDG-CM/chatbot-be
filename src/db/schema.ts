@@ -22,6 +22,11 @@ export const widgetKeyStatusEnum = pgEnum('widget_key_status', [
 
 export const messageRoleEnum = pgEnum('message_role', ['user', 'assistant']);
 
+export const messageFeedbackRatingEnum = pgEnum('message_feedback_rating', [
+  'GOOD',
+  'BAD',
+]);
+
 export const adminRoleEnum = pgEnum('admin_role', ['SUPER_ADMIN', 'ADMIN']);
 
 export const collaboratorRoleEnum = pgEnum('collaborator_role', ['VIEWER']);
@@ -193,7 +198,7 @@ export const messages = pgTable(
       .references(() => sessions.id, { onDelete: 'cascade' }),
     role: messageRoleEnum('role').notNull(),
     content: text('content').notNull(),
-    metadata: jsonb('metadata').$type<Record<string, any>>(),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },
   (table) => ({
@@ -201,6 +206,32 @@ export const messages = pgTable(
     createdAtIdx: index('messages_created_at_idx').on(table.createdAt),
     sessionCreatedIdx: index('messages_session_created_idx').on(
       table.sessionId,
+      table.createdAt,
+    ),
+  }),
+);
+
+/**
+ * 메시지 피드백 테이블
+ * - assistant 답변에 대한 현재 문제 해결 여부 피드백을 저장
+ */
+export const messageFeedbacks = pgTable(
+  'message_feedbacks',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => messages.id, { onDelete: 'cascade' }),
+    rating: messageFeedbackRatingEnum('rating').notNull(),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => ({
+    messageIdUnique: uniqueIndex('message_feedbacks_message_id_unique').on(
+      table.messageId,
+    ),
+    ratingCreatedAtIdx: index('message_feedbacks_rating_created_at_idx').on(
+      table.rating,
       table.createdAt,
     ),
   }),
@@ -264,7 +295,21 @@ export const messagesRelations = relations(messages, ({ one }) => ({
     fields: [messages.sessionId],
     references: [sessions.id],
   }),
+  feedback: one(messageFeedbacks, {
+    fields: [messages.id],
+    references: [messageFeedbacks.messageId],
+  }),
 }));
+
+export const messageFeedbacksRelations = relations(
+  messageFeedbacks,
+  ({ one }) => ({
+    message: one(messages, {
+      fields: [messageFeedbacks.messageId],
+      references: [messages.id],
+    }),
+  }),
+);
 
 export const usageDailyRelations = relations(usageDaily, ({ one }) => ({
   widgetKey: one(widgetKeys, {
@@ -292,6 +337,9 @@ export type NewSession = typeof sessions.$inferInsert;
 
 export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
+
+export type MessageFeedback = typeof messageFeedbacks.$inferSelect;
+export type NewMessageFeedback = typeof messageFeedbacks.$inferInsert;
 
 export type UsageDaily = typeof usageDaily.$inferSelect;
 export type NewUsageDaily = typeof usageDaily.$inferInsert;
