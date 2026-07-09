@@ -12,7 +12,11 @@ import { McpClientService } from '../../mcp/mcp-client.service';
 import { OpenRouterService } from './open-router.service';
 import { ChatService } from './chat.service';
 import { UsageService } from '../../usage/usage.service';
-import type { McpTool, OpenRouterMessage } from '../types/open-router.types';
+import type {
+  McpTool,
+  OpenRouterMessage,
+  OpenRouterUsage,
+} from '../types/open-router.types';
 import { MessageRole } from '../../common/dto/chat-message-input.dto';
 import type { Readable } from 'stream';
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -69,6 +73,37 @@ export class ChatOrchestrationService {
     private readonly usageService: UsageService,
     private readonly configService: ConfigService,
   ) {}
+
+  private createEmptyUsage(): OpenRouterUsage {
+    return {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
+  }
+
+  private addTokenUsage(
+    target: OpenRouterUsage | undefined,
+    usage: OpenRouterUsage | null | undefined,
+  ): void {
+    if (!target || !usage) return;
+
+    const promptTokens = usage.prompt_tokens ?? 0;
+    const completionTokens = usage.completion_tokens ?? 0;
+    const totalTokens = usage.total_tokens ?? promptTokens + completionTokens;
+
+    target.prompt_tokens += promptTokens;
+    target.completion_tokens += completionTokens;
+    target.total_tokens += totalTokens;
+  }
+
+  private hasTokenUsage(usage: OpenRouterUsage): boolean {
+    return (
+      usage.prompt_tokens > 0 ||
+      usage.completion_tokens > 0 ||
+      usage.total_tokens > 0
+    );
+  }
 
   /**
    * MCP Tool 목록을 가져오거나 캐시에서 반환
@@ -241,6 +276,7 @@ export class ChatOrchestrationService {
     question: string,
     resources: ListResourceItem[],
     maxResults: number = 10,
+    tokenUsage?: OpenRouterUsage,
   ): Promise<string[]> {
     if (!resources?.length) {
       return [];
@@ -262,6 +298,7 @@ export class ChatOrchestrationService {
         this.openRouterService.getModel('light'),
         { temperature: 0.1, max_tokens: 5000 },
       );
+      this.addTokenUsage(tokenUsage, response.usage);
 
       let selectedText = response.choices[0]?.message?.content?.trim() || '';
       this.logger.debug(`LLM chunk selection raw: ${selectedText}`);
@@ -298,6 +335,7 @@ export class ChatOrchestrationService {
     question: string,
     resources: Array<{ path: string; formats?: string[] }>,
     maxResults: number = 10,
+    tokenUsage?: OpenRouterUsage,
   ): Promise<Array<{ path: string; formats?: string[] }>> {
     if (!resources.length) {
       return [];
@@ -320,6 +358,7 @@ export class ChatOrchestrationService {
         this.openRouterService.getModel('light'),
         { temperature: 0.1, max_tokens: 200 },
       );
+      this.addTokenUsage(tokenUsage, response.usage);
 
       const selectedText = response.choices[0]?.message?.content?.trim() || '';
       this.logger.debug(`LLM selected resource paths: ${selectedText}`);
@@ -582,6 +621,7 @@ export class ChatOrchestrationService {
   private async selectMostRelevantDocuments(
     question: string,
     documents: Array<{ title: string; content: string; path: string }>,
+    tokenUsage?: OpenRouterUsage,
   ): Promise<Array<{ title: string; content: string; path: string }>> {
     if (documents.length === 0) {
       return [];
@@ -630,6 +670,7 @@ export class ChatOrchestrationService {
         this.openRouterService.getModel('normal'),
         { temperature: 0.1, max_tokens: 100 },
       );
+      this.addTokenUsage(tokenUsage, response.usage);
 
       const selectedText = response.choices[0]?.message?.content?.trim() || '';
       this.logger.debug(`LLM selected documents: ${selectedText}`);
@@ -679,6 +720,7 @@ export class ChatOrchestrationService {
     question: string,
     resources: ListResourceItem[],
     catalogChunks?: Array<{ path: string }>,
+    tokenUsage?: OpenRouterUsage,
   ): Promise<{
     content: string;
     usedResources: Array<{ path: string; formats: string[] }>;
@@ -692,6 +734,7 @@ export class ChatOrchestrationService {
       question,
       resources,
       10,
+      tokenUsage,
     );
     this.logger.log(
       `[PERF] selectRelevantChunkPaths(LLM): ${Date.now() - t0}ms`,
@@ -747,6 +790,7 @@ export class ChatOrchestrationService {
         content: doc.content,
         path: doc.path,
       })),
+      tokenUsage,
     );
     this.logger.log(
       `[PERF] selectMostRelevantDocuments(LLM, 신 형식): ${Date.now() - t0}ms`,
@@ -815,6 +859,7 @@ export class ChatOrchestrationService {
   private async fetchRelevantResourceContents(
     question: string,
     listResult: ListResourcesResult,
+    tokenUsage?: OpenRouterUsage,
   ): Promise<{
     content: string;
     usedResources: Array<{ path: string; formats: string[] }>;
@@ -830,6 +875,7 @@ export class ChatOrchestrationService {
         question,
         listResult.resources!,
         listResult.chunks,
+        tokenUsage,
       );
     }
 
@@ -856,6 +902,7 @@ export class ChatOrchestrationService {
       question,
       mdResources,
       10,
+      tokenUsage,
     );
     this.logger.log(
       `[PERF] selectRelevantResourcePaths(LLM, 구 형식): ${Date.now() - t0}ms`,
@@ -934,6 +981,7 @@ export class ChatOrchestrationService {
         content: doc.content,
         path: doc.path,
       })),
+      tokenUsage,
     );
     this.logger.log(
       `[PERF] selectMostRelevantDocuments(LLM, 구 형식): ${Date.now() - t0}ms`,
@@ -1173,8 +1221,10 @@ export class ChatOrchestrationService {
   ): Promise<{
     stream: Readable;
     resources: ResourceInfo[];
+    usage: OpenRouterUsage;
   }> {
     const perfTurnStart = Date.now();
+    const usage = this.createEmptyUsage();
 
     try {
       // 0. 과거 대화 조회 (현재 user 저장 전 → 직전 대화까지 context)
@@ -1237,7 +1287,7 @@ export class ChatOrchestrationService {
           this.openRouterService.getModel('normal'),
           { temperature: 0 },
         );
-        return { stream, resources: [] };
+        return { stream, resources: [], usage };
       }
 
       // 3. 관련 리소스 내용 가져오기 (신 형식: description 기반 chunk 선별 / 구 형식: 경로 선별 후 본문 fetch)
@@ -1245,6 +1295,7 @@ export class ChatOrchestrationService {
       const relevantResult = await this.fetchRelevantResourceContents(
         userQuestion,
         listResult,
+        usage,
       );
       this.logger.log(
         `[PERF] fetchRelevantResourceContents: ${Date.now() - t0}ms`,
@@ -1266,7 +1317,7 @@ export class ChatOrchestrationService {
           this.openRouterService.getModel('normal'),
           { temperature: 0 },
         );
-        return { stream, resources: [] };
+        return { stream, resources: [], usage };
       }
 
       const resultText =
@@ -1386,7 +1437,7 @@ export class ChatOrchestrationService {
         `[PERF] processUserQuestionStream 전체: ${Date.now() - perfTurnStart}ms`,
       );
 
-      return { stream, resources: allResources };
+      return { stream, resources: allResources, usage };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -1437,21 +1488,20 @@ export class ChatOrchestrationService {
     });
 
     try {
-      const { stream, resources } = await this.mcpClientService.withSession(
-        () =>
-          this.processUserQuestionStream(sessionId, userQuestion, {
-            persistUserMessage: options.persistUserMessage,
-            historyBefore: options.historyBefore,
-          }),
+      const {
+        stream,
+        resources,
+        usage: reasoningUsage,
+      } = await this.mcpClientService.withSession(() =>
+        this.processUserQuestionStream(sessionId, userQuestion, {
+          persistUserMessage: options.persistUserMessage,
+          historyBefore: options.historyBefore,
+        }),
       );
 
       let accumulatedContent = '';
       let model = '';
-      let usage: {
-        prompt_tokens: number;
-        completion_tokens: number;
-        total_tokens: number;
-      } | null = null;
+      let finalResponseUsage: OpenRouterUsage | null = null;
       let buffer = '';
 
       stream.on('data', (chunk: Buffer) => {
@@ -1477,7 +1527,7 @@ export class ChatOrchestrationService {
                 model = parsed.model;
               }
               if (parsed.usage) {
-                usage = parsed.usage;
+                finalResponseUsage = parsed.usage;
               }
             } catch {
               // JSON 파싱 실패 시 무시
@@ -1497,6 +1547,12 @@ export class ChatOrchestrationService {
       stream.on('end', () => {
         void (async () => {
           try {
+            const totalUsage = { ...reasoningUsage };
+            this.addTokenUsage(totalUsage, finalResponseUsage);
+            const usage = this.hasTokenUsage(totalUsage)
+              ? totalUsage
+              : undefined;
+
             if (accumulatedContent) {
               await this.chatService.createMessage(sessionId, {
                 role: MessageRole.ASSISTANT,
@@ -1504,7 +1560,7 @@ export class ChatOrchestrationService {
                 metadata: {
                   ...(options.assistantMetadata ?? {}),
                   model: model || undefined,
-                  usage: usage || undefined,
+                  usage,
                   resources: resources.length > 0 ? resources : undefined,
                 },
               });

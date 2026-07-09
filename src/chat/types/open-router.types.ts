@@ -64,6 +64,15 @@ export interface OpenRouterRequest {
   temperature?: number;
   max_tokens?: number;
   stream?: boolean;
+  stream_options?: {
+    include_usage?: boolean;
+  };
+}
+
+export interface OpenRouterUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 /**
@@ -77,11 +86,7 @@ export interface OpenRouterResponse {
     message: OpenRouterMessage;
     finish_reason: 'stop' | 'length' | 'tool_calls' | null;
   }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage?: OpenRouterUsage;
 }
 
 /**
