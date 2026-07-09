@@ -229,7 +229,6 @@ export class ChatService {
       );
     }
 
-    const updatedAt = new Date();
     const [feedback] = await this.db
       .insert(messageFeedbacks)
       .values({
@@ -240,7 +239,7 @@ export class ChatService {
         target: messageFeedbacks.messageId,
         set: {
           rating: dto.rating,
-          updatedAt: sql`case when ${messageFeedbacks.rating} = ${dto.rating} then ${messageFeedbacks.updatedAt} else ${updatedAt} end`,
+          updatedAt: sql`case when ${messageFeedbacks.rating} = ${dto.rating} then ${messageFeedbacks.updatedAt} else now() end`,
         },
       })
       .returning();
@@ -334,7 +333,7 @@ export class ChatService {
         UPDATE messages
         SET metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
           'regenerationClaimedAt',
-          ${new Date().toISOString()}
+          ${new Date().toISOString()}::text
         )
         WHERE id = ${messageId}
       `);
