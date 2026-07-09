@@ -390,6 +390,7 @@ ${params}`;
       temperature: options?.temperature ?? 0.7,
       max_tokens: 2000,
       stream: true,
+      stream_options: { include_usage: true },
     };
 
     const requestLogSummary = {
