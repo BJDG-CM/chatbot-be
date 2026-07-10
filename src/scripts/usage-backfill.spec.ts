@@ -5,12 +5,47 @@ import type { SQL } from 'drizzle-orm';
 import {
   aggregateUsageAnswerRows,
   makeUsageBucketKey,
+  parseLockTimeoutMs,
   runBackfill,
   type UsageAnswerRow,
 } from './usage-backfill';
 import { type Database } from '../db';
 
 const dialect = new PgDialect();
+
+describe('parseLockTimeoutMs', () => {
+  it.each([
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['zero', 0],
+    ['negative', -1000],
+    ['a decimal below 1ms that truncates to 0', 0.4],
+    ['empty string', ''],
+    ['blank string', '   '],
+    ['non-numeric string', 'abc'],
+  ] as const)('rejects %s', (_label, value) => {
+    expect(() => parseLockTimeoutMs(value)).toThrow();
+  });
+
+  it('accepts a valid positive integer', () => {
+    expect(parseLockTimeoutMs(30000)).toBe(30000);
+  });
+
+  it('accepts a numeric string', () => {
+    expect(parseLockTimeoutMs('5000')).toBe(5000);
+  });
+
+  it('truncates a valid decimal to an integer', () => {
+    expect(parseLockTimeoutMs(1500.7)).toBe(1500);
+  });
+
+  it('includes the source name in the error message', () => {
+    expect(() =>
+      parseLockTimeoutMs('nope', 'BACKFILL_LOCK_TIMEOUT_MS'),
+    ).toThrow(/BACKFILL_LOCK_TIMEOUT_MS/);
+  });
+});
 
 describe('makeUsageBucketKey', () => {
   it('serializes deterministically without control characters', () => {

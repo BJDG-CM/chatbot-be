@@ -1,18 +1,15 @@
-import {
-  Injectable,
-  Inject,
-  Logger,
-  InternalServerErrorException,
-} from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import {
   DB_CONNECTION,
   type Database,
+  messageFeedbacks,
+  messages,
   sessions,
   usageDaily,
   widgetKeys,
   widgetKeyCollaborators,
 } from '../db';
-import { eq, sql, and, inArray, gte, lte, ne } from 'drizzle-orm';
+import { eq, sql, and, inArray, gte, lt, lte, ne } from 'drizzle-orm';
 import { getSourceFromPageUrl } from '../common/utils/domain-validator.util';
 import {
   WidgetKeyStatsDto,
@@ -76,9 +73,12 @@ export function calculateResolutionRate(
 
 /**
  * 피드백 rating 전이에 따른 bad_answers 변화량을 계산한다.
- * - 없음/GOOD → BAD: +1
- * - BAD → 없음/GOOD: -1
- * - 그 외(상태 불변, GOOD↔없음): 0
+ * `previous`는 기존 rating(없음=null/undefined, GOOD, BAD), `next`는 새로 저장되는
+ * rating(GOOD 또는 BAD; 피드백 삭제 API가 없으므로 next는 항상 값이 있음)이다.
+ * - 없음 → BAD: +1
+ * - GOOD → BAD: +1
+ * - BAD → GOOD: -1
+ * - 동일 상태(GOOD→GOOD, BAD→BAD) 또는 없음 → GOOD: 0
  */
 export function computeBadAnswerDelta(
   previous: FeedbackRatingValue | null | undefined,
@@ -181,14 +181,16 @@ export class UsageService {
   /**
    * 피드백 변경에 따른 bad_answers delta를 반영한다.
    * 귀속 행은 피드백 등록 시점이 아니라 답변 생성 날짜(UTC)·domain을 기준으로 한다.
+   * 반드시 피드백 upsert와 같은 트랜잭션(executor=tx)에서 호출해야 한다.
    *
    * - delta가 0이면 no-op.
-   * - 대상 usage_daily 행이 없으면(assistant 답변은 존재하지만 집계 행이 없는 비정상 상태)
-   *   조용히 무시하지 않고 예외를 던져 상위 피드백 트랜잭션을 롤백시킨다.
-   * - `bad_answers + delta`를 SQL 산술로 갱신하여 같은 bucket의 서로 다른 메시지에서
-   *   동시에 피드백이 들어와도 lost update가 발생하지 않는다.
-   * - 결과가 음수이거나 total_answers를 초과하면 DB CHECK 제약이 트랜잭션을 실패시킨다.
-   *   (clamp로 오류를 숨기지 않는다.)
+   * - 빠른 경로: 집계 행이 이미 존재하고 delta 적용 후에도 불변식(0 <= bad <= total)이
+   *   유지되는 행에만 매칭되는 조건부 산술 UPDATE. 하나의 원자적 문이라 같은 bucket에
+   *   동시 피드백이 들어와도 lost update가 없다.
+   * - 복구 경로: 빠른 경로가 0행이면(집계 행이 없거나, 백필 전이라 total_answers가 아직
+   *   반영되지 않아 delta 적용이 불변식을 깨는 경우) source-of-truth에서 해당 bucket을
+   *   정확히 재계산해 절대값으로 맞춘다. 500을 던지지 않고 self-heal 하며, source 데이터
+   *   기준이라 bad <= total 불변식이 항상 성립한다.
    */
   async applyBadAnswerDelta(
     executor: UsageDbExecutor,
@@ -201,6 +203,8 @@ export class UsageService {
     const domain = getSourceFromPageUrl(params.pageUrl);
     const dateStr = toUtcDateString(params.createdAt);
 
+    // 빠른 경로: delta 적용 후에도 0 <= bad_answers <= total_answers 를 만족하는 행에만
+    // 매칭되도록 WHERE에 가드 조건을 건다. 매칭되면 CHECK 위반 없이 산술 갱신으로 끝난다.
     const updated = await executor
       .update(usageDaily)
       .set({
@@ -211,15 +215,111 @@ export class UsageService {
           eq(usageDaily.widgetKeyId, params.widgetKeyId),
           eq(usageDaily.date, dateStr),
           eq(usageDaily.domain, domain),
+          sql`${usageDaily.badAnswers} + ${params.delta} >= 0`,
+          sql`${usageDaily.badAnswers} + ${params.delta} <= ${usageDaily.totalAnswers}`,
         ),
       )
       .returning({ id: usageDaily.id });
 
-    if (updated.length === 0) {
-      throw new InternalServerErrorException(
-        `Usage aggregation row not found for assistant answer (widgetKeyId=${params.widgetKeyId}, date=${dateStr}, domain=${domain})`,
-      );
+    if (updated.length > 0) {
+      return;
     }
+
+    // 복구 경로: 행이 없거나 total_answers 미반영으로 빠른 경로가 불변식을 지킬 수 없는 경우.
+    await this.reconcileAnswerBucketFromSource(executor, {
+      widgetKeyId: params.widgetKeyId,
+      date: dateStr,
+      domain,
+    });
+  }
+
+  /**
+   * 특정 (widget_key, 날짜(UTC), domain) bucket의 total_answers/bad_answers를
+   * source-of-truth(messages ⋈ sessions ⟕ message_feedbacks)에서 재계산해 절대값으로 맞춘다.
+   *
+   * applyBadAnswerDelta의 예외(복구) 경로에서만 호출되는 write-path 전용 targeted scan이다.
+   * (대시보드 조회 경로에는 영향이 없다. getWidgetKeyStats는 여전히 usage_daily만 읽는다.)
+   *
+   * 동시성: bucket 행을 먼저 확보(placeholder insert)하고 FOR UPDATE로 잠근 뒤 source를
+   * 읽어 SET 하므로, 같은 bucket에 대한 동시 피드백 복구는 직렬화된다. assistant 메시지 저장은
+   * (메시지 insert + total_answers 증가)가 한 트랜잭션이고 그 증가가 이 bucket 행 잠금을
+   * 기다리므로, 미커밋 메시지가 재계산에 이중 반영되지 않는다.
+   *
+   * total_tokens / total_requests 는 변경하지 않으며, 절대값 SET이라 재실행에도 멱등하다.
+   */
+  private async reconcileAnswerBucketFromSource(
+    executor: UsageDbExecutor,
+    bucket: { widgetKeyId: string; date: string; domain: string },
+  ): Promise<void> {
+    // 잠글 대상 행을 확보(없으면 0/0으로 생성; CHECK 만족).
+    await executor
+      .insert(usageDaily)
+      .values({
+        widgetKeyId: bucket.widgetKeyId,
+        date: bucket.date,
+        domain: bucket.domain,
+        totalAnswers: 0,
+        badAnswers: 0,
+      })
+      .onConflictDoNothing();
+
+    // 같은 bucket에 대한 동시 복구를 직렬화한다.
+    await executor
+      .select({ id: usageDaily.id })
+      .from(usageDaily)
+      .where(
+        and(
+          eq(usageDaily.widgetKeyId, bucket.widgetKeyId),
+          eq(usageDaily.date, bucket.date),
+          eq(usageDaily.domain, bucket.domain),
+        ),
+      )
+      .for('update');
+
+    const dayStart = new Date(`${bucket.date}T00:00:00.000Z`);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+
+    // 해당 위젯·날짜의 assistant 답변을 읽어, domain은 앱과 동일한 getSourceFromPageUrl로 필터.
+    const rows = await executor
+      .select({
+        pageUrl: sessions.pageUrl,
+        rating: messageFeedbacks.rating,
+      })
+      .from(messages)
+      .innerJoin(sessions, eq(messages.sessionId, sessions.id))
+      .leftJoin(messageFeedbacks, eq(messageFeedbacks.messageId, messages.id))
+      .where(
+        and(
+          eq(messages.role, 'assistant'),
+          eq(sessions.widgetKeyId, bucket.widgetKeyId),
+          gte(messages.createdAt, dayStart),
+          lt(messages.createdAt, dayEnd),
+        ),
+      );
+
+    let totalAnswers = 0;
+    let badAnswers = 0;
+    for (const row of rows) {
+      if (getSourceFromPageUrl(row.pageUrl) !== bucket.domain) {
+        continue;
+      }
+      totalAnswers += 1;
+      if (row.rating === 'BAD') {
+        badAnswers += 1;
+      }
+    }
+
+    await executor
+      .update(usageDaily)
+      .set({ totalAnswers, badAnswers })
+      .where(
+        and(
+          eq(usageDaily.widgetKeyId, bucket.widgetKeyId),
+          eq(usageDaily.date, bucket.date),
+          eq(usageDaily.domain, bucket.domain),
+        ),
+      );
   }
 
   /**

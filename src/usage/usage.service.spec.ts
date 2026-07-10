@@ -1,4 +1,3 @@
-import { InternalServerErrorException } from '@nestjs/common';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import {
@@ -128,16 +127,22 @@ describe('UsageService.incrementTotalAnswers', () => {
   });
 });
 
-/**
- * applyBadAnswerDelta는 clamp 대신 명시적 UPDATE ... RETURNING을 수행한다.
- * 이 fake는 update().set().where().returning() 체인을 캡처하며,
- * INSERT 경로로 행을 새로 만들지 않는지(=silent create 금지)도 검증한다.
- */
-class FakeUpdate {
-  setPayload: Record<string, unknown> | undefined;
-  wherePayload: SQL | undefined;
+interface SourceRow {
+  pageUrl: string;
+  rating: 'GOOD' | 'BAD' | null;
+}
 
-  constructor(private readonly store: FakeUpdateExecutor) {}
+/**
+ * applyBadAnswerDelta의 빠른 경로(가드 산술 UPDATE)와 복구 경로(placeholder insert +
+ * FOR UPDATE 잠금 + source 재계산 + 절대값 SET)를 모두 캡처하는 fake.
+ * `guardedRows`를 []로 두면 빠른 경로가 0행이 되어 복구 경로가 실행된다.
+ */
+class FakeAggUpdate {
+  private setPayload: Record<string, unknown> = {};
+  private wherePayload: SQL | undefined;
+  private captured = false;
+
+  constructor(private readonly store: FakeAggExecutor) {}
 
   set(payload: Record<string, unknown>): this {
     this.setPayload = payload;
@@ -149,40 +154,105 @@ class FakeUpdate {
     return this;
   }
 
-  returning(_columns: unknown): Promise<unknown[]> {
+  private capture(hadReturning: boolean): void {
+    if (this.captured) return;
+    this.captured = true;
     this.store.updates.push({
-      set: this.setPayload ?? {},
+      set: this.setPayload,
       where: this.wherePayload,
+      hadReturning,
     });
+  }
+
+  returning(_columns: unknown): Promise<unknown[]> {
+    this.capture(true);
     if (this.store.failError) {
       return Promise.reject(this.store.failError);
     }
-    return Promise.resolve(this.store.returnRows);
+    return Promise.resolve(this.store.guardedRows);
+  }
+
+  // 복구 경로의 절대값 SET은 returning 없이 await 된다(thenable).
+  then<TResult1 = unknown, TResult2 = never>(
+    onfulfilled?: ((value: unknown) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): PromiseLike<TResult1 | TResult2> {
+    this.capture(false);
+    return Promise.resolve(undefined as unknown).then(onfulfilled, onrejected);
   }
 }
 
-class FakeUpdateExecutor {
+class FakeAggInsert {
+  private vals: Record<string, unknown> = {};
+  constructor(private readonly store: FakeAggExecutor) {}
+  values(v: Record<string, unknown>): this {
+    this.vals = v;
+    return this;
+  }
+  onConflictDoNothing(): Promise<void> {
+    this.store.inserts.push(this.vals);
+    return Promise.resolve();
+  }
+}
+
+class FakeAggSelect implements PromiseLike<SourceRow[]> {
+  constructor(private readonly store: FakeAggExecutor) {}
+  from(): this {
+    return this;
+  }
+  innerJoin(): this {
+    return this;
+  }
+  leftJoin(): this {
+    return this;
+  }
+  where(): this {
+    return this;
+  }
+  // FOR UPDATE 잠금 select은 .for()로 끝난다(await 대상).
+  for(_strength: unknown, _config?: unknown): Promise<unknown[]> {
+    this.store.forUpdateCalls += 1;
+    return Promise.resolve([]);
+  }
+  // source scan select은 .then으로 await 된다.
+  then<TResult1 = SourceRow[], TResult2 = never>(
+    onfulfilled?:
+      | ((value: SourceRow[]) => TResult1 | PromiseLike<TResult1>)
+      | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): PromiseLike<TResult1 | TResult2> {
+    return Promise.resolve(this.store.sourceRows).then(onfulfilled, onrejected);
+  }
+}
+
+class FakeAggExecutor {
+  guardedRows: unknown[] = [{ id: 'usage-daily-1' }];
+  sourceRows: SourceRow[] = [];
+  failError: Error | null = null;
+  forUpdateCalls = 0;
   readonly updates: Array<{
     set: Record<string, unknown>;
     where: SQL | undefined;
+    hadReturning: boolean;
   }> = [];
-  returnRows: unknown[] = [{ id: 'usage-daily-1' }];
-  failError: Error | null = null;
+  readonly inserts: Record<string, unknown>[] = [];
 
-  update(_table: unknown): FakeUpdate {
-    return new FakeUpdate(this);
+  update(_table: unknown): FakeAggUpdate {
+    return new FakeAggUpdate(this);
   }
-
-  insert(_table: unknown): never {
-    throw new Error('applyBadAnswerDelta must not INSERT a usage_daily row');
+  insert(_table: unknown): FakeAggInsert {
+    return new FakeAggInsert(this);
+  }
+  select(_columns: unknown): FakeAggSelect {
+    return new FakeAggSelect(this);
   }
 }
 
 describe('UsageService.applyBadAnswerDelta', () => {
   const service = new UsageService({} as unknown as Database);
 
-  it('applies +1 as a SQL arithmetic update on bad_answers', async () => {
-    const executor = new FakeUpdateExecutor();
+  it('fast path: applies +1 as a guarded SQL arithmetic update on bad_answers', async () => {
+    const executor = new FakeAggExecutor();
 
     await service.applyBadAnswerDelta(executor as never, {
       widgetKeyId: 'widget-key-1',
@@ -192,19 +262,26 @@ describe('UsageService.applyBadAnswerDelta', () => {
       delta: 1,
     });
 
+    // 빠른 경로만 실행(복구 경로 미실행).
     expect(executor.updates).toHaveLength(1);
+    expect(executor.inserts).toHaveLength(0);
+    expect(executor.forUpdateCalls).toBe(0);
+
     const setSql = render(executor.updates[0].set.badAnswers as SQL);
     expect(setSql.sql).toContain('"bad_answers" + ');
-    expect(setSql.params).toEqual([1]);
 
     const whereSql = render(executor.updates[0].where as SQL);
     expect(whereSql.params).toContain('widget-key-1');
     expect(whereSql.params).toContain('2026-07-01');
     expect(whereSql.params).toContain('www.example.com');
+    // 가드로 invariant를 지키므로 clamp(least/greatest)는 쓰지 않는다.
+    expect(whereSql.sql.toLowerCase()).not.toContain('least');
+    expect(whereSql.sql.toLowerCase()).not.toContain('greatest');
+    expect(setSql.sql.toLowerCase()).not.toContain('least');
   });
 
-  it('applies -1 as a SQL arithmetic update and parses app: page urls', async () => {
-    const executor = new FakeUpdateExecutor();
+  it('fast path: applies -1 and parses app: page urls the same way', async () => {
+    const executor = new FakeAggExecutor();
 
     await service.applyBadAnswerDelta(executor as never, {
       widgetKeyId: 'widget-key-1',
@@ -213,16 +290,14 @@ describe('UsageService.applyBadAnswerDelta', () => {
       delta: -1,
     });
 
-    const setSql = render(executor.updates[0].set.badAnswers as SQL);
-    expect(setSql.params).toEqual([-1]);
-
     const whereSql = render(executor.updates[0].where as SQL);
     expect(whereSql.params).toContain('com.company.myapp');
     expect(whereSql.params).toContain('2026-07-05');
+    expect(executor.forUpdateCalls).toBe(0);
   });
 
-  it('does not run any DB update when the delta is zero', async () => {
-    const executor = new FakeUpdateExecutor();
+  it('does not run any DB write when the delta is zero', async () => {
+    const executor = new FakeAggExecutor();
 
     await service.applyBadAnswerDelta(executor as never, {
       widgetKeyId: 'widget-key-1',
@@ -232,24 +307,92 @@ describe('UsageService.applyBadAnswerDelta', () => {
     });
 
     expect(executor.updates).toHaveLength(0);
+    expect(executor.inserts).toHaveLength(0);
   });
 
-  it('throws when the target usage_daily row does not exist (no silent clamp)', async () => {
-    const executor = new FakeUpdateExecutor();
-    executor.returnRows = []; // UPDATE matched no row
+  it('reconcile: GOOD -> BAD on a not-yet-backfilled answer recomputes the bucket from source', async () => {
+    const executor = new FakeAggExecutor();
+    executor.guardedRows = []; // 빠른 경로가 0행 → 복구 경로
+    // source: 같은 bucket에 assistant 답변 3개, 그중 BAD 1개
+    executor.sourceRows = [
+      { pageUrl: 'https://www.example.com/a', rating: 'BAD' },
+      { pageUrl: 'https://www.example.com/b', rating: 'GOOD' },
+      { pageUrl: 'https://www.example.com/c', rating: null },
+    ];
 
-    await expect(
-      service.applyBadAnswerDelta(executor as never, {
-        widgetKeyId: 'widget-key-1',
-        pageUrl: 'https://www.example.com',
-        createdAt: new Date('2026-07-05T00:00:00.000Z'),
-        delta: 1,
-      }),
-    ).rejects.toBeInstanceOf(InternalServerErrorException);
+    await service.applyBadAnswerDelta(executor as never, {
+      widgetKeyId: 'widget-key-1',
+      pageUrl: 'https://www.example.com/a',
+      createdAt: new Date('2026-07-01T05:00:00.000Z'),
+      delta: 1,
+    });
+
+    // 복구 경로: placeholder insert → FOR UPDATE 잠금 → 절대값 SET
+    expect(executor.inserts).toHaveLength(1);
+    expect(executor.inserts[0]).toMatchObject({
+      widgetKeyId: 'widget-key-1',
+      date: '2026-07-01',
+      domain: 'www.example.com',
+      totalAnswers: 0,
+      badAnswers: 0,
+    });
+    expect(executor.forUpdateCalls).toBe(1);
+
+    // 마지막 update는 returning 없는 절대값 SET
+    const reconcileSet = executor.updates[executor.updates.length - 1];
+    expect(reconcileSet.hadReturning).toBe(false);
+    expect(reconcileSet.set).toEqual({ totalAnswers: 3, badAnswers: 1 });
+    // token/request 컬럼은 건드리지 않는다.
+    expect(reconcileSet.set).not.toHaveProperty('totalTokens');
+    expect(reconcileSet.set).not.toHaveProperty('totalRequests');
+    // 불변식: bad <= total
+    expect(reconcileSet.set.badAnswers as number).toBeLessThanOrEqual(
+      reconcileSet.set.totalAnswers as number,
+    );
+  });
+
+  it('reconcile: BAD -> GOOD on a not-yet-backfilled answer sets absolute counts from source', async () => {
+    const executor = new FakeAggExecutor();
+    executor.guardedRows = [];
+    // BAD가 GOOD으로 바뀐 뒤의 source 상태: 답변 2개, BAD 0개
+    executor.sourceRows = [
+      { pageUrl: 'https://www.example.com/a', rating: 'GOOD' },
+      { pageUrl: 'https://www.example.com/b', rating: null },
+    ];
+
+    await service.applyBadAnswerDelta(executor as never, {
+      widgetKeyId: 'widget-key-1',
+      pageUrl: 'https://www.example.com/a',
+      createdAt: new Date('2026-07-01T05:00:00.000Z'),
+      delta: -1,
+    });
+
+    const reconcileSet = executor.updates[executor.updates.length - 1];
+    expect(reconcileSet.set).toEqual({ totalAnswers: 2, badAnswers: 0 });
+  });
+
+  it('reconcile: counts only answers whose domain matches the target bucket', async () => {
+    const executor = new FakeAggExecutor();
+    executor.guardedRows = [];
+    executor.sourceRows = [
+      { pageUrl: 'https://www.example.com/a', rating: 'BAD' },
+      // 다른 domain → 집계에서 제외되어야 한다.
+      { pageUrl: 'https://other.example.org/x', rating: 'BAD' },
+    ];
+
+    await service.applyBadAnswerDelta(executor as never, {
+      widgetKeyId: 'widget-key-1',
+      pageUrl: 'https://www.example.com/a',
+      createdAt: new Date('2026-07-01T05:00:00.000Z'),
+      delta: 1,
+    });
+
+    const reconcileSet = executor.updates[executor.updates.length - 1];
+    expect(reconcileSet.set).toEqual({ totalAnswers: 1, badAnswers: 1 });
   });
 
   it('propagates aggregation update failures so the feedback transaction rolls back', async () => {
-    const executor = new FakeUpdateExecutor();
+    const executor = new FakeAggExecutor();
     executor.failError = new Error('bad_answers check constraint violation');
 
     await expect(
@@ -260,21 +403,6 @@ describe('UsageService.applyBadAnswerDelta', () => {
         delta: 1,
       }),
     ).rejects.toThrow('bad_answers check constraint violation');
-  });
-
-  it('no longer clamps with least/greatest', async () => {
-    const executor = new FakeUpdateExecutor();
-
-    await service.applyBadAnswerDelta(executor as never, {
-      widgetKeyId: 'widget-key-1',
-      pageUrl: 'https://www.example.com',
-      createdAt: new Date('2026-07-05T00:00:00.000Z'),
-      delta: 1,
-    });
-
-    const setSql = render(executor.updates[0].set.badAnswers as SQL);
-    expect(setSql.sql.toLowerCase()).not.toContain('least');
-    expect(setSql.sql.toLowerCase()).not.toContain('greatest');
   });
 });
 

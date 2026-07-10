@@ -34,6 +34,7 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import * as schema from '../db/schema';
 import {
   DEFAULT_BACKFILL_LOCK_TIMEOUT_MS,
+  parseLockTimeoutMs,
   runBackfill,
 } from './usage-backfill';
 
@@ -45,13 +46,25 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/**
+ * BACKFILL_LOCK_TIMEOUT_MS 환경변수를 해석한다.
+ * 미설정이면 기본값을 사용하고, 설정된 경우(빈 문자열/비숫자/무한대/0/음수 포함)에는
+ * runBackfill과 동일한 parseLockTimeoutMs로 검증하여 잘못된 값이면 문제 변수명과 함께 오류를 던진다.
+ */
+function resolveLockTimeoutMsFromEnv(): number {
+  const raw = process.env.BACKFILL_LOCK_TIMEOUT_MS;
+  if (raw === undefined) {
+    return DEFAULT_BACKFILL_LOCK_TIMEOUT_MS;
+  }
+  return parseLockTimeoutMs(raw, 'BACKFILL_LOCK_TIMEOUT_MS');
+}
+
 /** postgres lock 획득 실패(lock_timeout 초과) 에러 코드 */
 const LOCK_NOT_AVAILABLE = '55P03';
 
 async function main(): Promise<void> {
-  const lockTimeoutMs = Number(
-    process.env.BACKFILL_LOCK_TIMEOUT_MS ?? DEFAULT_BACKFILL_LOCK_TIMEOUT_MS,
-  );
+  // DB 연결 전에 환경변수를 검증해 잘못된 값이면 곧바로 실패한다.
+  const lockTimeoutMs = resolveLockTimeoutMsFromEnv();
 
   const client = postgres({
     host: requireEnv('DB_HOST'),

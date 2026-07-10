@@ -52,6 +52,38 @@ export interface RunBackfillOptions {
 export const DEFAULT_BACKFILL_LOCK_TIMEOUT_MS = 30_000;
 
 /**
+ * lock_timeout(ms) 입력값을 검증해 안전한 양의 정수 ms로 변환한다.
+ * `SET LOCAL lock_timeout` SQL에 잘못된 값(NaN/Infinity/0/음수/빈 문자열)이 들어가
+ * 트랜잭션이 예측 불가능하게 동작하지 않도록, DB 작업 전에 fail-fast 시키기 위한 것이다.
+ * runBackfill과 CLI(환경변수 파서)가 동일 로직을 공유한다.
+ *
+ * @param value 숫자 또는 숫자 문자열
+ * @param source 오류 메시지에 표시할 입력 출처(예: 환경변수 이름)
+ * @returns 1 이상의 정수 ms
+ * @throws finite positive number가 아니거나 정수 변환 결과가 1ms 미만이면 Error
+ */
+export function parseLockTimeoutMs(
+  value: unknown,
+  source = 'lockTimeoutMs',
+): number {
+  const num = typeof value === 'string' ? Number(value.trim()) : Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    throw new Error(
+      `Invalid ${source}: expected a positive finite number of milliseconds, got ${JSON.stringify(value)}`,
+    );
+  }
+
+  const ms = Math.trunc(num);
+  if (ms < 1) {
+    throw new Error(
+      `Invalid ${source}: must be at least 1ms after truncation, got ${JSON.stringify(value)}`,
+    );
+  }
+
+  return ms;
+}
+
+/**
  * bucket key. 실제 제어 문자(NUL 등)를 쓰지 않고 JSON 직렬화하여
  * 어떤 값 조합에서도 구분자 충돌이 없고 diff 도구가 바이너리로 오해하지 않게 한다.
  */
@@ -106,7 +138,7 @@ export async function runBackfill(
   db: Database,
   options: RunBackfillOptions = {},
 ): Promise<RunBackfillResult> {
-  const lockTimeoutMs = Math.trunc(
+  const lockTimeoutMs = parseLockTimeoutMs(
     options.lockTimeoutMs ?? DEFAULT_BACKFILL_LOCK_TIMEOUT_MS,
   );
   const log = options.logger ?? ((message: string) => console.log(message));
