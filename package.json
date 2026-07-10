@@ -28,6 +28,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:safe": "bash scripts/migrate.sh",
+    "db:backfill:answers": "bun src/scripts/backfill-usage-answers.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
   },

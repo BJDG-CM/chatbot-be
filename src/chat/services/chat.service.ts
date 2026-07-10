@@ -12,8 +12,10 @@ import {
   type MessageFeedback,
   messageFeedbacks,
   messages,
+  sessions,
 } from '../../db';
 import { eq, and, lt, lte, desc, count, sql } from 'drizzle-orm';
+import { UsageService, computeBadAnswerDelta } from '../../usage/usage.service';
 import {
   ChatMessageInputDto,
   MessageRole,
@@ -35,7 +37,10 @@ export interface AnswerRegenerationTarget {
 
 @Injectable()
 export class ChatService {
-  constructor(@Inject(DB_CONNECTION) private db: Database) {}
+  constructor(
+    @Inject(DB_CONNECTION) private db: Database,
+    private readonly usageService: UsageService,
+  ) {}
 
   private toFeedbackRating(
     rating: MessageFeedback['rating'] | null | undefined,
@@ -192,17 +197,55 @@ export class ChatService {
     sessionId: string,
     dto: ChatMessageInputDto,
   ): Promise<ChatMessageDto> {
-    const [newMessage] = await this.db
-      .insert(messages)
-      .values({
-        sessionId,
-        role: dto.role,
-        content: dto.content,
-        metadata: dto.metadata || null,
-      })
-      .returning();
+    // user 메시지는 total_answers 집계 대상이 아니므로 단순 insert.
+    if (dto.role !== MessageRole.ASSISTANT) {
+      const [newMessage] = await this.db
+        .insert(messages)
+        .values({
+          sessionId,
+          role: dto.role,
+          content: dto.content,
+          metadata: dto.metadata || null,
+        })
+        .returning();
 
-    return this.toMessageDto(newMessage);
+      return this.toMessageDto(newMessage);
+    }
+
+    // assistant 메시지 저장과 usage_daily.total_answers 증가를 하나의 트랜잭션으로 묶어
+    // "답변이 저장됐는데 집계만 실패" 하는 상태가 남지 않도록 한다.
+    // 토큰 유무와 무관하게 답변이 저장되면 total_answers는 반드시 +1 된다.
+    // (답변 재생성으로 새 assistant 메시지가 생기면 이 경로로 정상 +1 된다.)
+    return this.db.transaction(async (tx) => {
+      const [newMessage] = await tx
+        .insert(messages)
+        .values({
+          sessionId,
+          role: dto.role,
+          content: dto.content,
+          metadata: dto.metadata || null,
+        })
+        .returning();
+
+      const [session] = await tx
+        .select({
+          widgetKeyId: sessions.widgetKeyId,
+          pageUrl: sessions.pageUrl,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+
+      if (session) {
+        await this.usageService.incrementTotalAnswers(tx, {
+          widgetKeyId: session.widgetKeyId,
+          pageUrl: session.pageUrl,
+          createdAt: newMessage.createdAt,
+        });
+      }
+
+      return this.toMessageDto(newMessage);
+    });
   }
 
   async upsertMessageFeedback(
@@ -210,45 +253,76 @@ export class ChatService {
     messageId: string,
     dto: MessageFeedbackInputDto,
   ): Promise<MessageFeedbackDto> {
-    const [message] = await this.db
-      .select({
-        id: messages.id,
-        role: messages.role,
-      })
-      .from(messages)
-      .where(and(eq(messages.id, messageId), eq(messages.sessionId, sessionId)))
-      .limit(1);
+    // 피드백 upsert와 usage_daily.bad_answers delta 반영을 하나의 트랜잭션으로 묶는다.
+    // 대상 message 행을 FOR UPDATE로 잠가 같은 메시지에 대한 동시 피드백 변경을 직렬화하고,
+    // 이전 rating과 새 rating을 비교해 정확히 한 번만 delta를 적용한다.
+    return this.db.transaction(async (tx) => {
+      const [target] = await tx
+        .select({
+          id: messages.id,
+          role: messages.role,
+          createdAt: messages.createdAt,
+          widgetKeyId: sessions.widgetKeyId,
+          pageUrl: sessions.pageUrl,
+        })
+        .from(messages)
+        .innerJoin(sessions, eq(messages.sessionId, sessions.id))
+        .where(
+          and(eq(messages.id, messageId), eq(messages.sessionId, sessionId)),
+        )
+        .for('update', { of: messages })
+        .limit(1);
 
-    if (!message) {
-      throw new NotFoundException('Message not found');
-    }
+      if (!target) {
+        throw new NotFoundException('Message not found');
+      }
 
-    if (message.role !== 'assistant') {
-      throw new BadRequestException(
-        'Feedback can only be submitted for assistant messages',
-      );
-    }
+      if (target.role !== 'assistant') {
+        throw new BadRequestException(
+          'Feedback can only be submitted for assistant messages',
+        );
+      }
 
-    const [feedback] = await this.db
-      .insert(messageFeedbacks)
-      .values({
-        messageId,
-        rating: dto.rating,
-      })
-      .onConflictDoUpdate({
-        target: messageFeedbacks.messageId,
-        set: {
+      // 잠긴 message 행 아래에서 기존 피드백 rating을 읽어 delta 판단 기준으로 삼는다.
+      const [existing] = await tx
+        .select({ rating: messageFeedbacks.rating })
+        .from(messageFeedbacks)
+        .where(eq(messageFeedbacks.messageId, messageId))
+        .limit(1);
+      const previousRating = existing?.rating ?? null;
+
+      const [feedback] = await tx
+        .insert(messageFeedbacks)
+        .values({
+          messageId,
           rating: dto.rating,
-          updatedAt: sql`case when ${messageFeedbacks.rating} = ${dto.rating} then ${messageFeedbacks.updatedAt} else now() end`,
-        },
-      })
-      .returning();
+        })
+        .onConflictDoUpdate({
+          target: messageFeedbacks.messageId,
+          set: {
+            rating: dto.rating,
+            updatedAt: sql`case when ${messageFeedbacks.rating} = ${dto.rating} then ${messageFeedbacks.updatedAt} else now() end`,
+          },
+        })
+        .returning();
 
-    if (!feedback) {
-      throw new InternalServerErrorException('Failed to save message feedback');
-    }
+      if (!feedback) {
+        throw new InternalServerErrorException(
+          'Failed to save message feedback',
+        );
+      }
 
-    return this.toMessageFeedbackDto(feedback);
+      // bad_answers는 피드백 등록 날짜가 아니라 답변(message) 생성 날짜·domain에 귀속시킨다.
+      const delta = computeBadAnswerDelta(previousRating, feedback.rating);
+      await this.usageService.applyBadAnswerDelta(tx, {
+        widgetKeyId: target.widgetKeyId,
+        pageUrl: target.pageUrl,
+        createdAt: target.createdAt,
+        delta,
+      });
+
+      return this.toMessageFeedbackDto(feedback);
+    });
   }
 
   async getAnswerRegenerationTarget(

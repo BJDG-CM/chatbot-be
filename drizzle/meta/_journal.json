@@ -57,6 +57,13 @@
       "when": 1783010423775,
       "tag": "0007_past_silk_fever",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783662838940,
+      "tag": "0008_add_usage_daily_answer_counts",
+      "breakpoints": true
     }
   ]
 }

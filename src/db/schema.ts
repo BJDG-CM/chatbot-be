@@ -11,8 +11,9 @@ import {
   integer,
   date,
   uniqueIndex,
+  check,
 } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 
 // Enums
 export const widgetKeyStatusEnum = pgEnum('widget_key_status', [
@@ -239,8 +240,10 @@ export const messageFeedbacks = pgTable(
 
 /**
  * 일별 사용량 집계 테이블
- * - 위젯 키·날짜·도메인별 토큰/요청 수를 실시간 누적
- * - 대시보드 조회 시 messages 테이블을 스캔하지 않고 이 테이블만 사용
+ * - 위젯 키·날짜·도메인별 토큰/요청 수 및 답변/BAD 답변 수를 실시간 누적
+ * - 대시보드 조회(토큰·요청·문제 해결률 포함) 시 messages 테이블을 스캔하지 않고 이 테이블만 사용
+ * - total_answers: assistant 답변이 저장될 때마다 +1 (답변 생성 날짜 기준)
+ * - bad_answers: BAD 피드백이 달린 답변 수 (피드백 delta로 조정, 답변 생성 날짜 기준)
  */
 export const usageDaily = pgTable(
   'usage_daily',
@@ -253,6 +256,8 @@ export const usageDaily = pgTable(
     domain: varchar('domain', { length: 512 }).notNull(),
     totalTokens: integer('total_tokens').notNull().default(0),
     totalRequests: integer('total_requests').notNull().default(0),
+    totalAnswers: integer('total_answers').notNull().default(0),
+    badAnswers: integer('bad_answers').notNull().default(0),
   },
   (table) => ({
     widgetKeyDateIdx: index('usage_daily_widget_key_date_idx').on(
@@ -262,6 +267,18 @@ export const usageDaily = pgTable(
     uniqueWidgetKeyDateDomain: uniqueIndex(
       'usage_daily_widget_key_id_date_domain_unique',
     ).on(table.widgetKeyId, table.date, table.domain),
+    totalAnswersNonNegative: check(
+      'usage_daily_total_answers_non_negative',
+      sql`${table.totalAnswers} >= 0`,
+    ),
+    badAnswersNonNegative: check(
+      'usage_daily_bad_answers_non_negative',
+      sql`${table.badAnswers} >= 0`,
+    ),
+    badAnswersLteTotal: check(
+      'usage_daily_bad_answers_lte_total',
+      sql`${table.badAnswers} <= ${table.totalAnswers}`,
+    ),
   }),
 );
 

@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ChatService } from './chat.service';
+import type { UsageService } from '../../usage/usage.service';
 import {
   type Database,
   type Message,
@@ -13,6 +14,11 @@ import {
 } from '../../db';
 import { FeedbackRating } from '../../common/dto/message-feedback.dto';
 import { MessageRole } from '../../common/dto/chat-message-input.dto';
+
+type FakeUsageService = {
+  incrementTotalAnswers: jest.Mock;
+  applyBadAnswerDelta: jest.Mock;
+};
 
 class SelectBuilder<Row> implements PromiseLike<Row[]> {
   constructor(private readonly rows: Row[]) {}
@@ -25,7 +31,15 @@ class SelectBuilder<Row> implements PromiseLike<Row[]> {
     return this;
   }
 
+  innerJoin(_table: unknown, _condition: unknown): this {
+    return this;
+  }
+
   where(_condition: unknown): this {
+    return this;
+  }
+
+  for(_strength: unknown, _config?: unknown): this {
     return this;
   }
 
@@ -157,21 +171,47 @@ class FakeDb {
   }
 }
 
-const createService = (): { service: ChatService; db: FakeDb } => {
+const createService = (): {
+  service: ChatService;
+  db: FakeDb;
+  usageService: FakeUsageService;
+} => {
   const db = new FakeDb();
+  const usageService: FakeUsageService = {
+    incrementTotalAnswers: jest.fn().mockResolvedValue(undefined),
+    applyBadAnswerDelta: jest.fn().mockResolvedValue(undefined),
+  };
   return {
-    service: new ChatService(db as unknown as Database),
+    service: new ChatService(
+      db as unknown as Database,
+      usageService as unknown as UsageService,
+    ),
     db,
+    usageService,
   };
 };
 
 describe('ChatService feedback', () => {
   const sessionId = 'session-1';
   const messageId = 'message-1';
+  const widgetKeyId = 'widget-key-1';
+  const pageUrl = 'https://www.example.com/help';
   const createdAt = new Date('2026-07-03T00:00:00.000Z');
 
-  const queueAssistantMessage = (db: FakeDb): void => {
-    db.queueSelect([{ id: messageId, role: MessageRole.ASSISTANT }]);
+  // upsertMessageFeedback는 (1) message+session 잠금 조회, (2) 기존 feedback rating 조회
+  // 순서로 select 하므로 두 개의 결과를 큐에 넣는다. 기존 rating은 현재 feedbackRows 상태에서 파생.
+  const queueFeedbackTarget = (db: FakeDb): void => {
+    db.queueSelect([
+      {
+        id: messageId,
+        role: MessageRole.ASSISTANT,
+        createdAt,
+        widgetKeyId,
+        pageUrl,
+      },
+    ]);
+    const existing = db.feedbackRows.find((row) => row.messageId === messageId);
+    db.queueSelect(existing ? [{ rating: existing.rating }] : []);
   };
 
   const queueBadFeedbackTarget = (db: FakeDb): void => {
@@ -188,7 +228,7 @@ describe('ChatService feedback', () => {
 
   it('creates GOOD feedback for an assistant answer', async () => {
     const { service, db } = createService();
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
 
     const result = await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.GOOD,
@@ -203,7 +243,7 @@ describe('ChatService feedback', () => {
 
   it('creates BAD feedback for an assistant answer', async () => {
     const { service, db } = createService();
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
 
     const result = await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.BAD,
@@ -215,13 +255,13 @@ describe('ChatService feedback', () => {
 
   it('keeps a single row when the same rating is submitted again', async () => {
     const { service, db } = createService();
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.GOOD,
     });
     const firstUpdatedAt = db.feedbackRows[0].updatedAt;
 
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.GOOD,
     });
@@ -233,12 +273,12 @@ describe('ChatService feedback', () => {
 
   it('updates GOOD feedback to BAD without creating a history row', async () => {
     const { service, db } = createService();
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.GOOD,
     });
 
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     const result = await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.BAD,
     });
@@ -249,18 +289,124 @@ describe('ChatService feedback', () => {
 
   it('updates BAD feedback to GOOD without creating a history row', async () => {
     const { service, db } = createService();
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.BAD,
     });
 
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     const result = await service.upsertMessageFeedback(sessionId, messageId, {
       rating: FeedbackRating.GOOD,
     });
 
     expect(result.rating).toBe(FeedbackRating.GOOD);
     expect(db.feedbackRows).toHaveLength(1);
+  });
+
+  it('applies no bad_answers delta when creating GOOD feedback (none -> GOOD)', async () => {
+    const { service, db, usageService } = createService();
+    queueFeedbackTarget(db);
+
+    await service.upsertMessageFeedback(sessionId, messageId, {
+      rating: FeedbackRating.GOOD,
+    });
+
+    expect(usageService.applyBadAnswerDelta).toHaveBeenCalledTimes(1);
+    expect(usageService.applyBadAnswerDelta).toHaveBeenLastCalledWith(db, {
+      widgetKeyId,
+      pageUrl,
+      createdAt,
+      delta: 0,
+    });
+  });
+
+  it('adds one bad answer when creating BAD feedback (none -> BAD)', async () => {
+    const { service, db, usageService } = createService();
+    queueFeedbackTarget(db);
+
+    await service.upsertMessageFeedback(sessionId, messageId, {
+      rating: FeedbackRating.BAD,
+    });
+
+    expect(usageService.applyBadAnswerDelta).toHaveBeenLastCalledWith(db, {
+      widgetKeyId,
+      pageUrl,
+      createdAt,
+      delta: 1,
+    });
+  });
+
+  it.each([
+    {
+      label: 'GOOD -> BAD adds one bad answer',
+      first: FeedbackRating.GOOD,
+      second: FeedbackRating.BAD,
+      expectedDelta: 1,
+    },
+    {
+      label: 'BAD -> GOOD removes one bad answer',
+      first: FeedbackRating.BAD,
+      second: FeedbackRating.GOOD,
+      expectedDelta: -1,
+    },
+    {
+      label: 'GOOD -> GOOD leaves bad answers unchanged',
+      first: FeedbackRating.GOOD,
+      second: FeedbackRating.GOOD,
+      expectedDelta: 0,
+    },
+    {
+      label: 'BAD -> BAD leaves bad answers unchanged',
+      first: FeedbackRating.BAD,
+      second: FeedbackRating.BAD,
+      expectedDelta: 0,
+    },
+  ])('$label', async ({ first, second, expectedDelta }) => {
+    const { service, db, usageService } = createService();
+
+    queueFeedbackTarget(db);
+    await service.upsertMessageFeedback(sessionId, messageId, {
+      rating: first,
+    });
+
+    queueFeedbackTarget(db);
+    await service.upsertMessageFeedback(sessionId, messageId, {
+      rating: second,
+    });
+
+    expect(usageService.applyBadAnswerDelta).toHaveBeenLastCalledWith(db, {
+      widgetKeyId,
+      pageUrl,
+      createdAt,
+      delta: expectedDelta,
+    });
+  });
+
+  it('attributes the bad_answers delta to the answer creation date/session', async () => {
+    const { service, db, usageService } = createService();
+    // 과거 날짜에 생성된 답변에 오늘 피드백을 등록하는 상황.
+    const pastCreatedAt = new Date('2026-07-01T10:00:00.000Z');
+    db.queueSelect([
+      {
+        id: messageId,
+        role: MessageRole.ASSISTANT,
+        createdAt: pastCreatedAt,
+        widgetKeyId,
+        pageUrl,
+      },
+    ]);
+    db.queueSelect([]);
+
+    await service.upsertMessageFeedback(sessionId, messageId, {
+      rating: FeedbackRating.BAD,
+    });
+
+    expect(usageService.applyBadAnswerDelta).toHaveBeenLastCalledWith(db, {
+      widgetKeyId,
+      pageUrl,
+      createdAt: pastCreatedAt,
+      delta: 1,
+    });
   });
 
   it('rejects a missing or inaccessible message', async () => {
@@ -290,7 +436,7 @@ describe('ChatService feedback', () => {
 
   it('propagates repository errors through the existing exception flow', async () => {
     const { service, db } = createService();
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
     db.insertError = new Error('db down');
 
     await expect(
@@ -303,7 +449,7 @@ describe('ChatService feedback', () => {
   it('throws a server error if the feedback row cannot be returned', async () => {
     const { service, db } = createService();
     db.returnEmptyFeedbackInsert = true;
-    queueAssistantMessage(db);
+    queueFeedbackTarget(db);
 
     await expect(
       service.upsertMessageFeedback(sessionId, messageId, {
@@ -442,5 +588,81 @@ describe('ChatService feedback', () => {
     await expect(
       service.getAnswerRegenerationTarget(sessionId, messageId),
     ).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+describe('ChatService assistant answer aggregation', () => {
+  const sessionId = 'session-1';
+  const widgetKeyId = 'widget-key-1';
+  const pageUrl = 'https://www.example.com/help';
+  // FakeDb.createMessage가 부여하는 고정 createdAt
+  const messageCreatedAt = new Date('2026-07-03T00:00:00.000Z');
+
+  it('increments total_answers exactly once when an assistant message is stored', async () => {
+    const { service, db, usageService } = createService();
+    db.queueSelect([{ widgetKeyId, pageUrl }]); // session lookup inside the tx
+
+    await service.createMessage(sessionId, {
+      role: MessageRole.ASSISTANT,
+      content: 'answer',
+    });
+
+    expect(usageService.incrementTotalAnswers).toHaveBeenCalledTimes(1);
+    expect(usageService.incrementTotalAnswers).toHaveBeenCalledWith(db, {
+      widgetKeyId,
+      pageUrl,
+      createdAt: messageCreatedAt,
+    });
+  });
+
+  it('does not touch total_answers for user messages', async () => {
+    const { service, usageService } = createService();
+
+    await service.createMessage(sessionId, {
+      role: MessageRole.USER,
+      content: 'question',
+    });
+
+    expect(usageService.incrementTotalAnswers).not.toHaveBeenCalled();
+  });
+
+  it('increments total_answers even when no usage/token information is involved', async () => {
+    // createMessage는 토큰 정보를 전혀 받지 않으므로, 답변 저장만으로 +1 되는지 확인.
+    const { service, db, usageService } = createService();
+    db.queueSelect([{ widgetKeyId, pageUrl }]);
+
+    await service.createMessage(sessionId, {
+      role: MessageRole.ASSISTANT,
+      content: 'answer without usage metadata',
+    });
+
+    expect(usageService.incrementTotalAnswers).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a regenerated assistant answer as a separate answer', async () => {
+    const { service, db, usageService } = createService();
+    db.queueSelect([{ widgetKeyId, pageUrl }]);
+
+    await service.createMessage(sessionId, {
+      role: MessageRole.ASSISTANT,
+      content: 'regenerated answer',
+      metadata: { regeneratedFromMessageId: 'original-message' },
+    });
+
+    expect(usageService.incrementTotalAnswers).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not increment total_answers when the message insert fails', async () => {
+    const { service, db, usageService } = createService();
+    db.insertError = new Error('db down');
+
+    await expect(
+      service.createMessage(sessionId, {
+        role: MessageRole.ASSISTANT,
+        content: 'answer',
+      }),
+    ).rejects.toThrow('db down');
+
+    expect(usageService.incrementTotalAnswers).not.toHaveBeenCalled();
   });
 });
