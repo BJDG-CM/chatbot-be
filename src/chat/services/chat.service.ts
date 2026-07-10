@@ -236,13 +236,20 @@ export class ChatService {
         .where(eq(sessions.id, sessionId))
         .limit(1);
 
-      if (session) {
-        await this.usageService.incrementTotalAnswers(tx, {
-          widgetKeyId: session.widgetKeyId,
-          pageUrl: session.pageUrl,
-          createdAt: newMessage.createdAt,
-        });
+      // session이 없으면 total_answers를 귀속시킬 수 없으므로 조용히 건너뛰지 않고
+      // 예외를 던져 메시지 저장까지 롤백한다.
+      // (assistant 메시지 저장 ⇔ total_answers 증가 불변식 유지)
+      if (!session) {
+        throw new InternalServerErrorException(
+          'Session not found while aggregating assistant answer',
+        );
       }
+
+      await this.usageService.incrementTotalAnswers(tx, {
+        widgetKeyId: session.widgetKeyId,
+        pageUrl: session.pageUrl,
+        createdAt: newMessage.createdAt,
+      });
 
       return this.toMessageDto(newMessage);
     });

@@ -1,4 +1,9 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  Logger,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import {
   DB_CONNECTION,
   type Database,
@@ -176,9 +181,14 @@ export class UsageService {
   /**
    * 피드백 변경에 따른 bad_answers delta를 반영한다.
    * 귀속 행은 피드백 등록 시점이 아니라 답변 생성 날짜(UTC)·domain을 기준으로 한다.
-   * delta가 0이면 아무 것도 하지 않는다.
-   * 피드백 upsert와 같은 트랜잭션에서 호출해야 하며, 대상 행은 GREATEST/LEAST로
-   * 클램프하여 동시성 상황에서도 0 <= bad_answers <= total_answers 불변식을 유지한다.
+   *
+   * - delta가 0이면 no-op.
+   * - 대상 usage_daily 행이 없으면(assistant 답변은 존재하지만 집계 행이 없는 비정상 상태)
+   *   조용히 무시하지 않고 예외를 던져 상위 피드백 트랜잭션을 롤백시킨다.
+   * - `bad_answers + delta`를 SQL 산술로 갱신하여 같은 bucket의 서로 다른 메시지에서
+   *   동시에 피드백이 들어와도 lost update가 발생하지 않는다.
+   * - 결과가 음수이거나 total_answers를 초과하면 DB CHECK 제약이 트랜잭션을 실패시킨다.
+   *   (clamp로 오류를 숨기지 않는다.)
    */
   async applyBadAnswerDelta(
     executor: UsageDbExecutor,
@@ -191,22 +201,25 @@ export class UsageService {
     const domain = getSourceFromPageUrl(params.pageUrl);
     const dateStr = toUtcDateString(params.createdAt);
 
-    await executor
-      .insert(usageDaily)
-      .values({
-        widgetKeyId: params.widgetKeyId,
-        date: dateStr,
-        domain,
-        // 정상 흐름에서는 답변 저장 시 total_answers 행이 이미 존재하므로 이 insert
-        // 경로는 도달하지 않는다. 불변식(bad_answers <= total_answers) 보호를 위해 0으로 둔다.
-        badAnswers: 0,
+    const updated = await executor
+      .update(usageDaily)
+      .set({
+        badAnswers: sql`${usageDaily.badAnswers} + ${params.delta}`,
       })
-      .onConflictDoUpdate({
-        target: [usageDaily.widgetKeyId, usageDaily.date, usageDaily.domain],
-        set: {
-          badAnswers: sql`least(${usageDaily.totalAnswers}, greatest(0, ${usageDaily.badAnswers} + ${params.delta}))`,
-        },
-      });
+      .where(
+        and(
+          eq(usageDaily.widgetKeyId, params.widgetKeyId),
+          eq(usageDaily.date, dateStr),
+          eq(usageDaily.domain, domain),
+        ),
+      )
+      .returning({ id: usageDaily.id });
+
+    if (updated.length === 0) {
+      throw new InternalServerErrorException(
+        `Usage aggregation row not found for assistant answer (widgetKeyId=${params.widgetKeyId}, date=${dateStr}, domain=${domain})`,
+      );
+    }
   }
 
   /**

@@ -665,4 +665,21 @@ describe('ChatService assistant answer aggregation', () => {
 
     expect(usageService.incrementTotalAnswers).not.toHaveBeenCalled();
   });
+
+  it('rolls back the assistant message when the session cannot be found', async () => {
+    // 메시지 insert 후 session 조회가 비면, 조용히 건너뛰지 않고 예외를 던져야 한다.
+    // (fake transaction은 실제 rollback을 재현하지 못하므로, 여기서는 예외 전파와
+    //  incrementTotalAnswers 미호출만 검증한다. 실 DB에서는 트랜잭션 전체가 롤백된다.)
+    const { service, db, usageService } = createService();
+    db.queueSelect([]); // session lookup returns nothing
+
+    await expect(
+      service.createMessage(sessionId, {
+        role: MessageRole.ASSISTANT,
+        content: 'answer',
+      }),
+    ).rejects.toBeInstanceOf(InternalServerErrorException);
+
+    expect(usageService.incrementTotalAnswers).not.toHaveBeenCalled();
+  });
 });
