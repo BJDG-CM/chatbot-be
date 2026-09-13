@@ -168,6 +168,23 @@ describe('fuseRankings', () => {
     expect(fused.find((c) => c.path === 'A/1')?.denseRank).toBe(1);
   });
 
+  it('keeps candidates from different documents apart even on the same path', () => {
+    // document_chunks의 유일성 제약은 (documentId, path)이므로 path가 겹칠 수 있다.
+    const fused = fuseRankings({
+      denseHits: [
+        dense({ path: '개요', resourceName: 'A', documentId: 'doc-a' }, 0.3),
+        dense({ path: '개요', resourceName: 'B', documentId: 'doc-b' }, 0.4),
+      ],
+      lexicalHits: [],
+      exactSignals: [],
+    });
+
+    expect(fused).toHaveLength(2);
+    expect(fused.map((c) => c.documentId).sort()).toEqual(['doc-a', 'doc-b']);
+    // 뒤 후보의 메타데이터가 앞 후보로 병합되지 않아야 한다.
+    expect(fused.find((c) => c.documentId === 'doc-b')?.resourceName).toBe('B');
+  });
+
   it('marks a chunk whose path equals the resource name as a root chunk', () => {
     const fused = fuseRankings({
       denseHits: [dense({ path: 'A', resourceName: 'A' }, 0.3)],
@@ -339,6 +356,17 @@ describe('enforceDocumentDiversity', () => {
     expect(
       enforceDocumentDiversity(candidates, { limit: 5, maxPerDocument: 2 }),
     ).toHaveLength(2);
+  });
+
+  it('does not treat the same path in two documents as a duplicate', () => {
+    const selected = enforceDocumentDiversity(
+      [
+        candidate({ path: '개요', resourceName: 'A', documentId: 'doc-a' }),
+        candidate({ path: '개요', resourceName: 'B', documentId: 'doc-b' }),
+      ],
+      { limit: 5, maxPerDocument: 2 },
+    );
+    expect(selected).toHaveLength(2);
   });
 
   it('deduplicates repeated paths', () => {

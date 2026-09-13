@@ -32,6 +32,16 @@ export type CandidateMetadata = {
   sortOrder: number;
 };
 
+/**
+ * chunk를 유일하게 식별하는 복합키.
+ * `document_chunks`의 유일성 제약이 (documentId, path)이므로 path 하나로는 부족합니다.
+ */
+export function candidateKey(
+  meta: Pick<CandidateMetadata, 'documentId' | 'path'>,
+): string {
+  return `${meta.documentId}::${meta.path}`;
+}
+
 export type DenseHit = CandidateMetadata & { distance: number };
 export type LexicalHit = CandidateMetadata & {
   score: number;
@@ -142,10 +152,13 @@ export function fuseRankings(input: FuseRankingsInput): RetrievalCandidate[] {
   const lexicalWeight = input.weights?.lexical ?? RRF_LEXICAL_WEIGHT;
   const exactWeight = input.weights?.exact ?? RRF_EXACT_WEIGHT;
 
-  const byPath = new Map<string, RetrievalCandidate>();
+  // chunk의 유일성 제약은 (documentId, path) 조합이므로 path만으로 묶으면
+  // 서로 다른 문서의 후보가 하나로 합쳐질 수 있습니다. 복합키로 식별합니다.
+  const byKey = new Map<string, RetrievalCandidate>();
 
   const upsert = (meta: CandidateMetadata): RetrievalCandidate => {
-    const existing = byPath.get(meta.path);
+    const key = candidateKey(meta);
+    const existing = byKey.get(key);
     if (existing) return existing;
     const candidate: RetrievalCandidate = {
       ...meta,
@@ -154,7 +167,7 @@ export function fuseRankings(input: FuseRankingsInput): RetrievalCandidate[] {
       exactMatches: [],
       fusedScore: 0,
     };
-    byPath.set(meta.path, candidate);
+    byKey.set(key, candidate);
     return candidate;
   };
 
@@ -175,7 +188,7 @@ export function fuseRankings(input: FuseRankingsInput): RetrievalCandidate[] {
     }
   });
 
-  const candidates = [...byPath.values()];
+  const candidates = [...byKey.values()];
 
   for (const candidate of candidates) {
     const { score, matches } = scoreExactMatches(candidate, input.exactSignals);
@@ -202,7 +215,7 @@ export function fuseRankings(input: FuseRankingsInput): RetrievalCandidate[] {
   return candidates.sort(compareCandidates);
 }
 
-/** 결정적 정렬: 융합 점수 → 벡터 거리 → 경로 순. */
+/** 결정적 정렬: 융합 점수 → 벡터 거리 → 복합키 순. */
 function compareCandidates(
   a: RetrievalCandidate,
   b: RetrievalCandidate,
@@ -211,7 +224,8 @@ function compareCandidates(
   const aDistance = a.denseDistance ?? Number.POSITIVE_INFINITY;
   const bDistance = b.denseDistance ?? Number.POSITIVE_INFINITY;
   if (aDistance !== bDistance) return aDistance - bDistance;
-  return a.path.localeCompare(b.path);
+  // 같은 path를 가진 다른 문서가 있어도 순서가 흔들리지 않도록 복합키로 비교합니다.
+  return candidateKey(a).localeCompare(candidateKey(b));
 }
 
 export type FilterDecision = {
@@ -338,11 +352,11 @@ export function enforceDocumentDiversity(
   if (limit < 1) return [];
 
   const perDocument = new Map<string, number>();
-  const selectedPaths = new Set<string>();
+  const selectedKeys = new Set<string>();
   const selected: RetrievalCandidate[] = [];
 
   const take = (candidate: RetrievalCandidate) => {
-    selectedPaths.add(candidate.path);
+    selectedKeys.add(candidateKey(candidate));
     perDocument.set(
       candidate.documentId,
       (perDocument.get(candidate.documentId) ?? 0) + 1,
@@ -352,14 +366,14 @@ export function enforceDocumentDiversity(
 
   for (const candidate of candidates) {
     if (selected.length >= limit) break;
-    if (selectedPaths.has(candidate.path)) continue;
+    if (selectedKeys.has(candidateKey(candidate))) continue;
     if (perDocument.has(candidate.documentId)) continue;
     take(candidate);
   }
 
   for (const candidate of candidates) {
     if (selected.length >= limit) break;
-    if (selectedPaths.has(candidate.path)) continue;
+    if (selectedKeys.has(candidateKey(candidate))) continue;
     if ((perDocument.get(candidate.documentId) ?? 0) >= maxPerDocument)
       continue;
     take(candidate);
