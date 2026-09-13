@@ -203,6 +203,14 @@ export function extractExactSignals(normalized: string): ExactSignal[] {
   const seen = new Set<string>();
   let match: RegExpExecArray | null;
 
+  /**
+   * 과목코드가 차지한 문자 범위. 뒤에 오는 수량·숫자 규칙이 같은 자리를 다시
+   * 해석하지 못하게 막습니다. 예: "EC2201 회로이론"에서 "2201 회"를 수량으로 읽는 경우.
+   */
+  const courseCodeRanges: Array<[number, number]> = [];
+  const overlapsCourseCode = (start: number, end: number): boolean =>
+    courseCodeRanges.some(([from, to]) => start < to && end > from);
+
   // 따옴표로 감싼 구절은 사용자가 직접 지정한 정확 일치 요구로 취급합니다.
   const quoted = /"([^"]{2,60})"|'([^']{2,60})'|「([^」]{2,60})」/g;
   while ((match = quoted.exec(normalized)) !== null) {
@@ -212,6 +220,7 @@ export function extractExactSignals(normalized: string): ExactSignal[] {
   // 과목코드/식별자: EC2205, GS1001, EC 2205
   const courseCode = /\b([A-Za-z]{2,4})\s?(\d{3,4})\b/g;
   while ((match = courseCode.exec(normalized)) !== null) {
+    courseCodeRanges.push([match.index, match.index + match[0].length]);
     pushSignal(
       signals,
       seen,
@@ -226,10 +235,18 @@ export function extractExactSignals(normalized: string): ExactSignal[] {
     pushSignal(signals, seen, match[0], 'year');
   }
 
-  // 학기/분기: 2학기, 1 학기
-  const semester = /(\d)\s*(학기|분기)/g;
+  // 학기: 2학기, 1 학기, 12학기
+  // 앞뒤 숫자 경계가 "12학기"에서 "2학기"만 떼어내는 오탐을 막습니다.
+  // 한 자리로 제한하지 않는 것은 최장재학연한 규정처럼 "12학기 이내" 표현이 쓰이기 때문입니다.
+  const semester = /(?<!\d)(\d{1,2})\s*학기(?!\d)/g;
   while ((match = semester.exec(normalized)) !== null) {
-    pushSignal(signals, seen, `${match[1]}${match[2]}`, 'semester');
+    pushSignal(signals, seen, `${match[1]}학기`, 'semester');
+  }
+
+  // 분기: 1~4만 존재하므로 범위를 제한해 오탐을 줄입니다.
+  const quarter = /(?<!\d)([1-4])\s*분기(?!\d)/g;
+  while ((match = quarter.exec(normalized)) !== null) {
+    pushSignal(signals, seen, `${match[1]}분기`, 'semester');
   }
 
   // 날짜: 9월 18일 / 2026-03-02
@@ -244,23 +261,32 @@ export function extractExactSignals(normalized: string): ExactSignal[] {
     pushSignal(signals, seen, match[0], 'date');
   }
 
-  // 대문자 약어: GIST, GIFT, MOU (과목코드로 이미 잡힌 경우는 seen이 막아줍니다)
+  // 대문자 약어: GIST, GIFT, MOU
+  // "EC 2201"처럼 과목코드가 띄어 쓰인 경우의 "EC"는 약어가 아니므로 제외합니다.
   const abbreviation = /\b[A-Z]{2,}\b/g;
   while ((match = abbreviation.exec(normalized)) !== null) {
+    if (overlapsCourseCode(match.index, match.index + match[0].length)) {
+      continue;
+    }
     pushSignal(signals, seen, match[0], 'abbreviation');
   }
 
-  // 수량: 130학점, 3시간
-  // 숫자와 단위 사이의 공백은 허용하지 않습니다. 허용하면 "EC2201 회로이론"에서
-  // "2201 회"를 수량으로 잡는 등 한 글자 단위의 오탐이 발생합니다.
-  const measure = /(\d{1,4})(학점|시간|주|회|명|원|점|단계|개)/g;
+  // 수량: 130학점, 130 학점, 3시간, 3 시간
+  const measure = /(?<!\d)(\d{1,4})\s*(학점|시간|주|회|명|원|점|단계|개)/g;
   while ((match = measure.exec(normalized)) !== null) {
+    if (overlapsCourseCode(match.index, match.index + match[0].length)) {
+      continue;
+    }
     pushSignal(signals, seen, `${match[1]}${match[2]}`, 'measure');
   }
 
   // 남은 숫자(2자리 이상). 위 규칙에 걸리지 않은 식별자성 숫자를 담습니다.
+  // 과목코드의 숫자 부분("EC 2201"의 2201)은 이미 더 강한 신호로 잡혔으므로 제외합니다.
   const bareNumber = /\b\d{2,}\b/g;
   while ((match = bareNumber.exec(normalized)) !== null) {
+    if (overlapsCourseCode(match.index, match.index + match[0].length)) {
+      continue;
+    }
     pushSignal(signals, seen, match[0], 'number');
   }
 

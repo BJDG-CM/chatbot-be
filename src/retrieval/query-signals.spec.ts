@@ -46,6 +46,14 @@ describe('extractExactSignals', () => {
     expect(values).toContain('2학기');
   });
 
+  it('restricts quarter values but allows a two-digit semester', () => {
+    expect(signalValues('4 학기 4분기')).toEqual(['4학기', '4분기']);
+    // 분기는 1~4만 존재하므로 5분기는 신호가 아니다.
+    expect(signalValues('5분기 실적')).not.toContain('5분기');
+    // 반면 학기는 최장재학연한 규정처럼 두 자리가 쓰인다.
+    expect(signalValues('12학기 5분기')).toContain('12학기');
+  });
+
   it('does not read a semester out of 계절학기', () => {
     expect(signalValues('2026 하계 계절학기 일정')).toEqual(['2026']);
   });
@@ -70,16 +78,47 @@ describe('extractExactSignals', () => {
     );
   });
 
-  it('extracts measures such as 학점', () => {
-    expect(signalValues('졸업하려면 130학점 필요해?')).toContain('130학점');
+  it('extracts measures with or without whitespace', () => {
+    const values = signalValues('졸업하려면 130 학점, 주당 3 시간 필요해?');
+    expect(values).toContain('130학점');
+    expect(values).toContain('3시간');
   });
 
-  it('does not read a measure across a space into the next word', () => {
+  it('supports a space between the number and the unit', () => {
+    expect(signalValues('3 시간 수업')).toContain('3시간');
+    expect(signalValues('130 학점 필요')).toContain('130학점');
+  });
+
+  it('keeps a measure that is followed by a particle', () => {
+    expect(signalValues('130학점을 이수')).toContain('130학점');
+  });
+
+  it('does not reinterpret the digits of a course code', () => {
+    // "EC 2201"의 2201은 과목코드로 이미 잡혔으므로 숫자·약어로 중복 추출하지 않는다.
+    expect(signalValues('EC 2201 선수과목')).toEqual(['EC2201']);
+  });
+
+  it('extracts a two-digit semester such as 12학기', () => {
+    // 최장재학연한 규정에 쓰이는 표현. 12에서 2학기만 떼어내면 안 된다.
+    const values = signalValues('12학기 이내 졸업');
+    expect(values).toContain('12학기');
+    expect(values).not.toContain('2학기');
+  });
+
+  it('does not read a measure out of a course code', () => {
     // "EC2201 회로이론"의 "회"를 수량 단위로 잡으면 안 됩니다.
     const values = signalValues('EC2201 회로이론');
     expect(values).toContain('EC2201');
     expect(values).not.toContain('2201회');
     expect(signalKinds('EC2201 회로이론')).not.toContain('measure');
+  });
+
+  it('matches a spaced measure against document text without whitespace', () => {
+    const signals = extractExactSignals(normalizeQuery('130 학점'));
+    expect(matchExactSignals('졸업요건: 130학점', signals)).toContainEqual({
+      value: '130학점',
+      kind: 'measure',
+    });
   });
 
   it('returns nothing for a query with no discriminative token', () => {
