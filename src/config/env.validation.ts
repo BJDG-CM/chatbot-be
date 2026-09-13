@@ -26,6 +26,27 @@ enum LlmProvider {
 }
 
 /**
+ * "true"/"false"만 불리언으로 변환하고, 그 외 값은 문자열 그대로 남깁니다.
+ * 남은 문자열은 `@IsBoolean()`이 거부하므로 `fasle`·`0`·`off` 같은 오타가
+ * 조용히 기본값으로 흡수되지 않습니다(kill-switch가 의도와 반대로 동작하는 것을 막습니다).
+ * 미설정(undefined/빈 문자열)은 기존 동작을 유지하기 위해 기본값을 사용합니다.
+ */
+function parseBooleanEnv(defaultValue: boolean) {
+  return ({ value }: { value: unknown }): unknown => {
+    if (typeof value === 'boolean') return value;
+    if (value === undefined || value === null || value === '') {
+      return defaultValue;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+    return value;
+  };
+}
+
+/**
  * 환경 변수 검증 클래스
  * 애플리케이션 시작 시 필수 환경 변수와 형식을 검증합니다.
  */
@@ -53,13 +74,7 @@ export class EnvironmentVariables {
   DB_NAME: string;
 
   @IsBoolean()
-  @Transform(({ value }) => {
-    if (typeof value === 'boolean') return value;
-    if (typeof value === 'string') {
-      return value.toLowerCase() === 'true';
-    }
-    return false;
-  })
+  @Transform(parseBooleanEnv(false))
   DB_SSL: boolean;
 
   // Application Configuration
@@ -163,13 +178,7 @@ export class EnvironmentVariables {
   /** 벡터 검색 kill-switch. false면 항상 LLM 선별 사용. 기본 true. */
   @IsOptional()
   @IsBoolean()
-  @Transform(({ value }) => {
-    if (typeof value === 'boolean') return value;
-    if (typeof value === 'string') {
-      return value.toLowerCase() !== 'false';
-    }
-    return true;
-  })
+  @Transform(parseBooleanEnv(true))
   EMBEDDING_RETRIEVAL_ENABLED?: boolean;
 
   // Hybrid retrieval (dense + lexical + exact) 튜닝
@@ -178,13 +187,7 @@ export class EnvironmentVariables {
   /** lexical(ILIKE) 검색 kill-switch. false면 벡터 전용으로 동작. 기본 true. */
   @IsOptional()
   @IsBoolean()
-  @Transform(({ value }) => {
-    if (typeof value === 'boolean') return value;
-    if (typeof value === 'string') {
-      return value.toLowerCase() !== 'false';
-    }
-    return true;
-  })
+  @Transform(parseBooleanEnv(true))
   RETRIEVAL_LEXICAL_ENABLED?: boolean;
 
   /** dense 후보 풀 크기. 최종 선택 개수보다 크게 잡아 재랭킹 여지를 만듭니다. 기본 20. */
