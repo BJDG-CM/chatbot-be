@@ -333,6 +333,13 @@ export const CHUNK_EMBEDDING_DIMENSIONS = 3072;
  * 문서 청크 테이블
  * - Pass2 의미 청킹 결과 (path / description / content)
  * - embedding: 벡터 검색용 코사인 유사도 임베딩 (null이면 미임베딩 → 백필 대상)
+ *
+ * 참고: lexical 검색(ILIKE)용 pg_trgm GIN 인덱스
+ * (`document_chunks_path_trgm_idx` / `_description_trgm_idx` / `_content_trgm_idx`,
+ * `documents_title_trgm_idx` / `documents_summary_trgm_idx`)는
+ * 연산자 클래스(gin_trgm_ops)를 drizzle 스키마로 표현하지 않고
+ * migration `0017_trigram_lexical_search.sql`에만 정의되어 있습니다
+ * (`CREATE EXTENSION vector`를 0016에서 처리한 것과 같은 방식).
  */
 export const documentChunks = pgTable(
   'document_chunks',

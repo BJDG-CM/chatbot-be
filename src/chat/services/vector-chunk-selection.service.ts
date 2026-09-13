@@ -2,57 +2,105 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EmbeddingService } from '../../embedding/embedding.service';
 import { RetrievalService } from '../../retrieval/retrieval.service';
+import { extractQuerySignals } from '../../retrieval/query-signals';
+import {
+  applyAdaptiveConfidenceFilter,
+  enforceDocumentDiversity,
+  fuseRankings,
+  type DenseHit,
+  type LexicalHit,
+  type RetrievalCandidate,
+} from '../../retrieval/rank-fusion';
+import {
+  DENSE_CANDIDATE_LIMIT,
+  FINAL_CHUNK_LIMIT,
+  LEXICAL_CANDIDATE_LIMIT,
+  MAX_CHUNKS_PER_DOCUMENT,
+  MAX_VECTOR_DISTANCE,
+  STRONG_VECTOR_DISTANCE,
+} from '../../retrieval/retrieval.constants';
 import type { RelevantChunkSelection } from './resource-selection.service';
 
 /**
- * 코사인 거리 상한 기본값. 이보다 먼 chunk는 "관련 없음"으로 간주합니다.
- * text-embedding-3-large 실측: 관련 질문 상위 chunk ≈ 0.35~0.62, 무관 질문 ≈ 0.78+.
- */
-const DEFAULT_MAX_DISTANCE = 0.75;
-
-/**
- * 벡터 임베딩(코사인 유사도) 기반 chunk 선별.
- * - LLM 선별(ResourceSelectionService.selectRelevantChunkPaths) 대비 저지연·저비용 경로.
- * - null 반환 = 벡터 검색 불가(비활성화/임베딩 실패/미백필) → 호출부가 LLM 선별로 폴백.
- * - 빈 선택 반환 = 임베딩된 chunk는 있으나 전부 임계값 밖 → 관련 자료 없음.
+ * LLM을 쓰지 않는 하이브리드 chunk 선별.
+ *
+ *   질의 → 정규화·exact 신호 추출
+ *        → dense Top-K(벡터) + lexical Top-K(ILIKE)  [병렬]
+ *        → RRF 순위 융합 (+ exact 가점)
+ *        → 적응형 신뢰도 필터
+ *        → 문서 다양성 정책
+ *        → 최종 4~5개 + 루트 개요 chunk
+ *
+ * 설계 의도
+ * - 후보 생성은 recall 우선(기본 20개), 최종 선택은 precision 우선(기본 5개).
+ *   코사인 최근접 5개가 항상 최선의 컨텍스트는 아니기 때문입니다.
+ * - 검색·선별 단계에 LLM이나 cross-encoder를 쓰지 않아 지연이 벡터 전용 경로와 비슷합니다.
+ *
+ * 반환값 규약(PR #51과 동일하게 유지)
+ * - null        = 벡터 검색 불가(비활성화/임베딩 실패/미백필) → 호출부가 LLM 선별로 폴백
+ * - 빈 선택     = 후보는 있었으나 전부 신뢰도 미달 → 관련 자료 없음
  */
 @Injectable()
 export class VectorChunkSelectionService {
   private readonly logger = new Logger(VectorChunkSelectionService.name);
 
   private readonly enabled: boolean;
+  private readonly lexicalEnabled: boolean;
   private readonly maxDistance: number;
+  private readonly strongDistance: number;
+  private readonly denseCandidateLimit: number;
+  private readonly lexicalCandidateLimit: number;
+  private readonly maxChunksPerDocument: number;
 
   constructor(
     private readonly embeddingService: EmbeddingService,
     private readonly retrievalService: RetrievalService,
     configService: ConfigService,
   ) {
-    const enabledRaw = configService.get<string>(
-      'EMBEDDING_RETRIEVAL_ENABLED',
-      'true',
+    this.enabled = !isFalse(
+      configService.get<string>('EMBEDDING_RETRIEVAL_ENABLED', 'true'),
     );
-    this.enabled = String(enabledRaw).toLowerCase() !== 'false';
+    this.lexicalEnabled = !isFalse(
+      configService.get<string>('RETRIEVAL_LEXICAL_ENABLED', 'true'),
+    );
 
-    const maxDistanceRaw = Number(
+    this.maxDistance = positiveNumber(
       configService.get<string>('EMBEDDING_MAX_DISTANCE'),
+      MAX_VECTOR_DISTANCE,
     );
-    this.maxDistance =
-      Number.isFinite(maxDistanceRaw) && maxDistanceRaw > 0
-        ? maxDistanceRaw
-        : DEFAULT_MAX_DISTANCE;
+    this.strongDistance = Math.min(
+      positiveNumber(
+        configService.get<string>('RETRIEVAL_STRONG_DISTANCE'),
+        STRONG_VECTOR_DISTANCE,
+      ),
+      this.maxDistance,
+    );
+    this.denseCandidateLimit = positiveNumber(
+      configService.get<string>('RETRIEVAL_DENSE_CANDIDATE_LIMIT'),
+      DENSE_CANDIDATE_LIMIT,
+    );
+    this.lexicalCandidateLimit = positiveNumber(
+      configService.get<string>('RETRIEVAL_LEXICAL_CANDIDATE_LIMIT'),
+      LEXICAL_CANDIDATE_LIMIT,
+    );
+    this.maxChunksPerDocument = positiveNumber(
+      configService.get<string>('RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT'),
+      MAX_CHUNKS_PER_DOCUMENT,
+    );
   }
 
   async selectRelevantChunkPaths(
     question: string,
-    maxResults: number = 5,
+    maxResults: number = FINAL_CHUNK_LIMIT,
   ): Promise<RelevantChunkSelection | null> {
     if (!this.enabled || !this.embeddingService.isEnabled()) {
       return null;
     }
 
+    const startedAt = Date.now();
+    const signals = extractQuerySignals(question);
+
     let queryEmbedding: number[];
-    const t0 = Date.now();
     try {
       queryEmbedding = await this.embeddingService.embedText(question);
     } catch {
@@ -60,48 +108,152 @@ export class VectorChunkSelectionService {
       return null;
     }
 
-    let hits: Array<{ path: string; resourceName: string; distance: number }>;
-    try {
-      hits = await this.retrievalService.searchChunksByEmbedding(
+    // dense와 lexical은 서로 의존하지 않으므로 병렬로 실행해 추가 지연을 최소화합니다.
+    const useLexical = this.lexicalEnabled && signals.terms.length > 0;
+    const [denseResult, lexicalResult] = await Promise.allSettled([
+      this.retrievalService.searchChunksByEmbedding(
         queryEmbedding,
-        maxResults,
-      );
-    } catch (error) {
+        this.denseCandidateLimit,
+      ),
+      useLexical
+        ? this.retrievalService.searchChunksByLexical(
+            signals.terms,
+            signals.exactSignals.map((signal) => signal.value),
+            this.lexicalCandidateLimit,
+          )
+        : Promise.resolve([] as LexicalHit[]),
+    ]);
+
+    if (denseResult.status === 'rejected') {
       this.logger.warn(
-        `Vector search failed; falling back to LLM: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `Vector search failed; falling back to LLM: ${describeError(denseResult.reason)}`,
       );
       return null;
     }
-    this.logger.log(
-      `[PERF] vector chunk selection(embed+search): ${Date.now() - t0}ms`,
-    );
+    const denseHits: DenseHit[] = denseResult.value;
 
-    if (hits.length === 0) {
+    // lexical은 보조 신호이므로 실패해도 dense 단독으로 계속 진행합니다.
+    let lexicalHits: LexicalHit[] = [];
+    if (lexicalResult.status === 'fulfilled') {
+      lexicalHits = lexicalResult.value;
+    } else {
+      this.logger.warn(
+        `Lexical search failed; continuing with dense only: ${describeError(lexicalResult.reason)}`,
+      );
+    }
+
+    const searchMs = Date.now() - startedAt;
+
+    if (denseHits.length === 0) {
       // 임베딩된 chunk가 하나도 없는 상태(백필 전 등) — LLM 선별로 폴백
       this.logger.warn('No embedded chunks available; falling back to LLM');
       return null;
     }
 
-    const withinThreshold = hits.filter((h) => h.distance <= this.maxDistance);
-    this.logger.log(
-      `[DEBUG] 벡터 선별: 상위 ${hits.length}개 중 임계값(${this.maxDistance}) 이내 ${withinThreshold.length}개, ` +
-        `최소 거리 ${hits[0].distance.toFixed(3)}`,
-    );
+    const candidates = fuseRankings({
+      denseHits,
+      lexicalHits,
+      exactSignals: signals.exactSignals,
+    });
+
+    const { kept, decisions } = applyAdaptiveConfidenceFilter(candidates, {
+      maxDistance: this.maxDistance,
+      strongDistance: this.strongDistance,
+    });
+
+    // 루트 개요 chunk는 세부 chunk 쿼터를 소비하지 않습니다.
+    const rootHits = kept.filter((candidate) => candidate.isRoot);
+    const detailCandidates = kept.filter((candidate) => !candidate.isRoot);
+
+    const selected = enforceDocumentDiversity(detailCandidates, {
+      maxPerDocument: this.maxChunksPerDocument,
+      limit: maxResults,
+    });
 
     const rootPaths = new Set<string>();
-    const detailPaths: string[] = [];
-    for (const hit of withinThreshold.slice(0, maxResults)) {
-      if (hit.path === hit.resourceName) {
-        rootPaths.add(hit.path);
-      } else {
-        detailPaths.push(hit.path);
-        // 세부 chunk 선택 시 루트 개요도 함께 참조 (LLM 선별과 동일한 동작)
-        rootPaths.add(hit.resourceName);
-      }
+    for (const root of rootHits.slice(0, maxResults)) {
+      rootPaths.add(root.path);
     }
+    const detailPaths: string[] = [];
+    for (const candidate of selected) {
+      detailPaths.push(candidate.path);
+      // 세부 chunk 선택 시 루트 개요도 함께 참조 (PR #51 / LLM 선별과 동일한 동작)
+      rootPaths.add(candidate.resourceName);
+    }
+
+    this.logRetrieval({
+      signals,
+      denseHits,
+      lexicalHits,
+      candidates,
+      decisions,
+      selected,
+      rootPaths: [...rootPaths],
+      searchMs,
+      totalMs: Date.now() - startedAt,
+    });
 
     return { rootPaths: [...rootPaths], detailPaths };
   }
+
+  /**
+   * 검색 판단 근거를 남깁니다. 문서 본문은 로드하지도 기록하지도 않고,
+   * 경로·순위·점수 등 판단에 필요한 메타데이터만 남깁니다.
+   */
+  private logRetrieval(info: {
+    signals: ReturnType<typeof extractQuerySignals>;
+    denseHits: DenseHit[];
+    lexicalHits: LexicalHit[];
+    candidates: RetrievalCandidate[];
+    decisions: ReturnType<typeof applyAdaptiveConfidenceFilter>['decisions'];
+    selected: RetrievalCandidate[];
+    rootPaths: string[];
+    searchMs: number;
+    totalMs: number;
+  }): void {
+    const bestDistance = info.denseHits[0]?.distance;
+    this.logger.log(
+      `[PERF] hybrid chunk selection: ${info.totalMs}ms (embed+search ${info.searchMs}ms)`,
+    );
+    this.logger.log(
+      `[DEBUG] 하이브리드 선별: dense ${info.denseHits.length}개(최소 거리 ${
+        bestDistance != null ? bestDistance.toFixed(3) : 'n/a'
+      }), lexical ${info.lexicalHits.length}개, 융합 후보 ${info.candidates.length}개 → ` +
+        `통과 ${info.decisions.filter((d) => d.keep).length}개 → 최종 세부 ${info.selected.length}개 / 루트 ${info.rootPaths.length}개`,
+    );
+
+    if (info.signals.exactSignals.length > 0) {
+      this.logger.debug(
+        `[DEBUG] exact 신호: ${info.signals.exactSignals
+          .map((signal) => `${signal.value}(${signal.kind})`)
+          .join(', ')}`,
+      );
+    }
+
+    for (const decision of info.decisions.slice(0, 10)) {
+      const candidate = decision.candidate;
+      this.logger.debug(
+        `[DEBUG] ${decision.keep ? 'KEEP' : 'DROP'} ${candidate.path} ` +
+          `rrf=${candidate.fusedScore.toFixed(5)} ` +
+          `dense=${candidate.denseRank ?? '-'}/${candidate.denseDistance?.toFixed(3) ?? '-'} ` +
+          `lex=${candidate.lexicalRank ?? '-'}/${candidate.lexicalScore ?? '-'} ` +
+          `exact=${candidate.exactRank ?? '-'}/${candidate.exactScore}` +
+          `${candidate.exactMatches.length ? `[${candidate.exactMatches.join('|')}]` : ''} ` +
+          `reason=${decision.reason}`,
+      );
+    }
+  }
+}
+
+function isFalse(value: string | undefined): boolean {
+  return String(value).toLowerCase() === 'false';
+}
+
+function positiveNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

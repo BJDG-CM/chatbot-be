@@ -120,6 +120,13 @@
       "when": 1787837630023,
       "tag": "0016_wakeful_catseye",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789302124242,
+      "tag": "0017_trigram_lexical_search",
+      "breakpoints": true
     }
   ]
 }
