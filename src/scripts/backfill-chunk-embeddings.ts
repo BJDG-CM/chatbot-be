@@ -24,11 +24,15 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { eq, isNull } from 'drizzle-orm';
 import * as schema from '../db/schema';
+import { buildDatabaseSslOptions } from '../db/ssl-options';
 import { documents, documentChunks } from '../db/schema';
 import { buildChunkEmbeddingInput } from '../embedding/chunk-embedding-input';
 import { DEFAULT_EMBEDDING_MODEL } from '../embedding/embedding.service';
 
 const BATCH_SIZE = 64;
+
+/** EmbeddingService와 동일한 요청 제한 시간. 응답 없는 서버에 무기한 매달리지 않기 위함. */
+const EMBEDDING_TIMEOUT_MS = 15_000;
 
 function requireEnv(name: string, fallbackName?: string): string {
   const value =
@@ -47,14 +51,32 @@ async function embedTexts(
   model: string,
   texts: string[],
 ): Promise<number[][]> {
-  const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/embeddings`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ model, input: texts }),
-  });
+  // fetch에는 기본 제한 시간이 없어, 서버가 연결만 붙잡고 응답하지 않으면
+  // 백필이 무기한 멈춘다. AbortController로 명시적으로 끊는다.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EMBEDDING_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl.replace(/\/+$/, '')}/embeddings`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model, input: texts }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(
+        `Embedding API timed out after ${EMBEDDING_TIMEOUT_MS}ms`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const body = await response.text();
@@ -95,7 +117,7 @@ async function main(): Promise<void> {
     username: requireEnv('DB_USER'),
     password: requireEnv('DB_PASSWORD'),
     max: 1,
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: buildDatabaseSslOptions(process.env.DB_SSL === 'true'),
   });
   const db = drizzle(client, { schema });
 

@@ -32,6 +32,7 @@
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import * as schema from '../db/schema';
+import { buildDatabaseSslOptions } from '../db/ssl-options';
 import {
   DEFAULT_BACKFILL_LOCK_TIMEOUT_MS,
   parseLockTimeoutMs,
@@ -73,7 +74,7 @@ async function main(): Promise<void> {
     username: requireEnv('DB_USER'),
     password: requireEnv('DB_PASSWORD'),
     max: 1,
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+    ssl: buildDatabaseSslOptions(process.env.DB_SSL === 'true'),
   });
   const db = drizzle(client, { schema });
 

@@ -2,6 +2,11 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import * as schema from './schema';
+import {
+  buildDatabaseSslOptions,
+  needsTlsVerificationWarning,
+  TLS_VERIFICATION_WARNING,
+} from './ssl-options';
 
 // Database connection token
 export const DB_CONNECTION = Symbol('DB_CONNECTION');
@@ -86,11 +91,14 @@ export async function withMigrationAdvisoryLock<T>(
 
 // Database connection factory with SSL options
 export const createDatabaseConnection = (params: DatabaseConnectionParams) => {
+  if (needsTlsVerificationWarning(params.sslEnabled)) {
+    console.warn(`[db] ${TLS_VERIFICATION_WARNING}`);
+  }
   const options = {
     max: 10,
     idle_timeout: 20,
     connect_timeout: 10,
-    ssl: params.sslEnabled ? { rejectUnauthorized: false } : false,
+    ssl: buildDatabaseSslOptions(params.sslEnabled),
   };
 
   // 보안: connection string 대신 개별 파라미터 사용하여 GitGuardian 감지 방지
@@ -116,7 +124,7 @@ export const runMigrations = async (params: DatabaseConnectionParams) => {
     username: params.user,
     password: params.password,
     max: 1,
-    ssl: params.sslEnabled ? { rejectUnauthorized: false } : false,
+    ssl: buildDatabaseSslOptions(params.sslEnabled),
   });
   // Determine migrations folder path based on environment
   const migrationsFolder =
