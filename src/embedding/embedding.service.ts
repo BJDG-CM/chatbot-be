@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import type { AxiosError } from 'axios';
+import { assertSecureEndpoint } from './embedding-endpoint';
 
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-large';
 
@@ -38,7 +39,20 @@ export class EmbeddingService {
       configService.get<string>('LETSUR_AI_GATEWAY_API_KEY') ||
       '';
 
-    this.baseUrl = baseUrl ? baseUrl.replace(/\/+$/, '') : null;
+    // Bearer 토큰이 평문으로 나가지 않도록 HTTPS를 요구합니다(localhost는 예외).
+    // 잘못 설정된 경우 임베딩을 비활성화해, 호출부가 LLM 선별로 폴백하게 둡니다.
+    let validatedBaseUrl: string | null = null;
+    if (baseUrl) {
+      try {
+        validatedBaseUrl = assertSecureEndpoint(baseUrl, 'Embedding base URL');
+      } catch (error) {
+        this.logger.error(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+
+    this.baseUrl = validatedBaseUrl;
     this.apiKey = apiKey || null;
     this.model =
       configService.get<string>('EMBEDDING_MODEL') || DEFAULT_EMBEDDING_MODEL;
