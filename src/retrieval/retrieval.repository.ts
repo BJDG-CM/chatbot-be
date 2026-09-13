@@ -74,12 +74,14 @@ export function toLikePattern(term: string): string {
 export function buildLexicalScoreSql(
   terms: string[],
   exactTerms: string[],
-): { score: SQL<number>; match: SQL } | null {
+): { score: SQL<number>; matchedTerms: SQL<number>; match: SQL } | null {
   if (terms.length === 0) return null;
 
   const exactSet = new Set(exactTerms.map((term) => term.toLowerCase()));
   const scoreParts: SQL[] = [];
   const matchConditions: SQL[] = [];
+  /** 검색어별로 "어느 필드든 하나라도 맞았는가"를 1/0으로 세는 항 */
+  const matchedTermParts: SQL[] = [];
 
   // 본문(content)을 제외한 메타데이터 필드와 가중치
   const weightedFields: Array<[SQLWrapper, number]> = [
@@ -93,15 +95,26 @@ export function buildLexicalScoreSql(
     term: string,
     fields: Array<[SQLWrapper, number]>,
     multiplier: number,
+    /**
+     * 매칭된 검색어 수에 포함할지 여부.
+     * 본문 전용 항은 이미 메타데이터에서 센 검색어를 다시 세지 않도록 제외합니다.
+     */
+    countAsTerm = true,
   ) => {
     const pattern = toLikePattern(term);
+    const termConditions: SQL[] = [];
     for (const [column, fieldWeight] of fields) {
       // 가중치는 내부 상수이므로 리터럴로 넣어 파라미터 타입 추론 문제를 피합니다.
       const weight = sql.raw(String(fieldWeight * multiplier));
       scoreParts.push(
         sql`(CASE WHEN ${column} ILIKE ${pattern} THEN ${weight} ELSE 0 END)`,
       );
-      matchConditions.push(sql`${column} ILIKE ${pattern}`);
+      termConditions.push(sql`${column} ILIKE ${pattern}`);
+    }
+    matchConditions.push(...termConditions);
+    const anyField = or(...termConditions);
+    if (countAsTerm && anyField) {
+      matchedTermParts.push(sql`(CASE WHEN ${anyField} THEN 1 ELSE 0 END)`);
     }
   };
 
@@ -118,6 +131,7 @@ export function buildLexicalScoreSql(
       term,
       [[documentChunks.content, LEXICAL_FIELD_WEIGHTS.content]],
       LEXICAL_EXACT_TERM_MULTIPLIER,
+      false,
     );
   }
 
@@ -126,6 +140,9 @@ export function buildLexicalScoreSql(
 
   return {
     score: sql<number>`(${sql.join(scoreParts, sql` + `)})`,
+    matchedTerms: matchedTermParts.length
+      ? sql<number>`(${sql.join(matchedTermParts, sql` + `)})`
+      : sql<number>`0`,
     match,
   };
 }
@@ -251,7 +268,7 @@ export class RetrievalRepository {
 
     const lexical = buildLexicalScoreSql(terms, exactTerms);
     if (!lexical) return [];
-    const { score, match } = lexical;
+    const { score, matchedTerms, match } = lexical;
 
     const rows = await this.db
       .select({
@@ -263,6 +280,7 @@ export class RetrievalRepository {
         title: documents.title,
         summary: documents.summary,
         score,
+        matchedTerms,
       })
       .from(documentChunks)
       .innerJoin(documents, eq(documentChunks.documentId, documents.id))
@@ -279,6 +297,7 @@ export class RetrievalRepository {
       title: row.title,
       summary: row.summary,
       score: Number(row.score),
+      matchedTerms: Number(row.matchedTerms),
     }));
   }
 

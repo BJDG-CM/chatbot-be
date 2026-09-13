@@ -159,6 +159,7 @@ export class VectorChunkSelectionService {
     const { kept, decisions } = applyAdaptiveConfidenceFilter(candidates, {
       maxDistance: this.maxDistance,
       strongDistance: this.strongDistance,
+      queryTermCount: signals.terms.length,
     });
 
     // 루트 개요 chunk는 세부 chunk 쿼터를 소비하지 않습니다.

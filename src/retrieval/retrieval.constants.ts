@@ -66,6 +66,18 @@ export const VECTOR_DISTANCE_MARGIN = 0.08;
  */
 export const STRONG_EXACT_SCORE = 4;
 
+/**
+ * 벡터 근거를 보강하는 lexical 증거로 인정하기 위해 필요한 "서로 다른 검색어" 수.
+ *
+ * lexical 점수만으로는 "여러 검색어가 맞았다"와 "흔한 단어 하나가 여러 필드에 있다"를
+ * 구분할 수 없습니다. 예컨대 "안내"는 제목·경로·요약에 모두 등장하는 것만으로도
+ * 높은 점수를 받아, 무관한 문서가 거리 임계값 안으로 끌려 들어옵니다.
+ * 그래서 점수가 아니라 매칭된 검색어 개수를 기준으로 삼습니다.
+ *
+ * 검색어가 이 값보다 적은 질의(예: 단어 하나짜리)는 질의의 검색어 수를 상한으로 씁니다.
+ */
+export const MIN_LEXICAL_MATCHED_TERMS = 2;
+
 /** lexical 점수 계산 시 필드별 가중치 (DB-side ORDER BY에 그대로 사용). */
 export const LEXICAL_FIELD_WEIGHTS = {
   /** 문서 제목 — 가장 강한 신호 */

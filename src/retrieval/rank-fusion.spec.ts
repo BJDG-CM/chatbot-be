@@ -40,9 +40,14 @@ const dense = (spec: ChunkSpec, distance: number): DenseHit => ({
   distance,
 });
 
-const lexical = (spec: ChunkSpec, score: number): LexicalHit => ({
+const lexical = (
+  spec: ChunkSpec,
+  score: number,
+  matchedTerms = 2,
+): LexicalHit => ({
   ...meta(spec),
   score,
+  matchedTerms,
 });
 
 const candidate = (
@@ -200,11 +205,56 @@ describe('applyAdaptiveConfidenceFilter', () => {
       candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
       candidate(
         { path: 'B/1', resourceName: 'B' },
-        { denseDistance: 0.68, lexicalRank: 1 },
+        { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 2 },
       ),
     ]);
     expect(kept.map((c) => c.path)).toEqual(['A/1', 'B/1']);
     expect(decisions[1].reason).toBe('vector+lexical');
+  });
+
+  it('does not let a single common word rescue a middling vector hit', () => {
+    // "안내"처럼 흔한 단어 하나가 여러 필드에 있어 점수만 높은 경우
+    const { kept, decisions } = applyAdaptiveConfidenceFilter(
+      [
+        candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
+        candidate(
+          { path: 'B/1', resourceName: 'B' },
+          { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 1 },
+        ),
+      ],
+      { queryTermCount: 3 },
+    );
+    expect(kept.map((c) => c.path)).toEqual(['A/1']);
+    expect(decisions[1].reason).toBe('weak-support');
+  });
+
+  it('accepts lexical support once enough distinct terms match', () => {
+    const { kept, decisions } = applyAdaptiveConfidenceFilter(
+      [
+        candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
+        candidate(
+          { path: 'B/1', resourceName: 'B' },
+          { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 2 },
+        ),
+      ],
+      { queryTermCount: 3 },
+    );
+    expect(kept.map((c) => c.path)).toEqual(['A/1', 'B/1']);
+    expect(decisions[1].reason).toBe('vector+lexical');
+  });
+
+  it('still accepts a single match when the query has only one term', () => {
+    const { kept } = applyAdaptiveConfidenceFilter(
+      [
+        candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
+        candidate(
+          { path: 'B/1', resourceName: 'B' },
+          { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 1 },
+        ),
+      ],
+      { queryTermCount: 1 },
+    );
+    expect(kept.map((c) => c.path)).toEqual(['A/1', 'B/1']);
   });
 
   it('drops a middling vector hit with no lexical or exact support', () => {

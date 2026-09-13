@@ -10,6 +10,7 @@ import {
   FINAL_CHUNK_LIMIT,
   MAX_CHUNKS_PER_DOCUMENT,
   MAX_VECTOR_DISTANCE,
+  MIN_LEXICAL_MATCHED_TERMS,
   RRF_DENSE_WEIGHT,
   RRF_EXACT_WEIGHT,
   RRF_K,
@@ -32,7 +33,11 @@ export type CandidateMetadata = {
 };
 
 export type DenseHit = CandidateMetadata & { distance: number };
-export type LexicalHit = CandidateMetadata & { score: number };
+export type LexicalHit = CandidateMetadata & {
+  score: number;
+  /** 이 후보에 실제로 맞은 서로 다른 검색어 수 (흔한 단어 하나의 반복과 구분하기 위함) */
+  matchedTerms: number;
+};
 
 export type RetrievalCandidate = CandidateMetadata & {
   /** 문서 전체 개요 chunk 여부 (path === resourceName) */
@@ -43,6 +48,7 @@ export type RetrievalCandidate = CandidateMetadata & {
 
   lexicalRank?: number;
   lexicalScore?: number;
+  lexicalMatchedTerms?: number;
 
   exactRank?: number;
   exactScore: number;
@@ -165,6 +171,7 @@ export function fuseRankings(input: FuseRankingsInput): RetrievalCandidate[] {
     if (candidate.lexicalRank == null) {
       candidate.lexicalRank = index + 1;
       candidate.lexicalScore = hit.score;
+      candidate.lexicalMatchedTerms = hit.matchedTerms;
     }
   });
 
@@ -218,6 +225,13 @@ export type AdaptiveFilterOptions = {
   strongDistance?: number;
   distanceMargin?: number;
   strongExactScore?: number;
+  /**
+   * lexical을 벡터 근거의 보강으로 인정하기 위해 필요한 매칭 검색어 수.
+   * 질의의 전체 검색어 수(queryTermCount)가 이보다 적으면 그쪽을 상한으로 씁니다.
+   */
+  minLexicalMatchedTerms?: number;
+  /** 질의에서 뽑은 전체 검색어 수. 단어 하나짜리 질의를 과도하게 막지 않기 위해 씁니다. */
+  queryTermCount?: number;
 };
 
 /**
@@ -227,8 +241,9 @@ export type AdaptiveFilterOptions = {
  *  - 벡터 유사도가 충분히 강함 (distance <= strongDistance), 또는
  *  - 벡터 유사도가 허용 범위 안이고(distance <= maxDistance) 다음 중 하나가 성립
  *      · 최상위 후보와 사실상 동률 (distance <= best + margin)
- *      · lexical 검색에도 잡힘
  *      · exact 신호가 맞음
+ *      · lexical 검색에서 서로 다른 검색어가 충분히 맞음
+ *        ("안내" 같은 흔한 단어 하나가 여러 필드에 있는 것만으로는 인정하지 않습니다)
  *  - 벡터 후보가 아니더라도 title/path급 exact 근거가 강함 (exactScore >= strongExactScore)
  *
  * maxDistance 안쪽의 최상위 dense 후보는 margin 규칙에 의해 항상 살아남으므로,
@@ -243,6 +258,14 @@ export function applyAdaptiveConfidenceFilter(
   const strongDistance = options.strongDistance ?? STRONG_VECTOR_DISTANCE;
   const distanceMargin = options.distanceMargin ?? VECTOR_DISTANCE_MARGIN;
   const strongExactScore = options.strongExactScore ?? STRONG_EXACT_SCORE;
+  // 검색어가 하나뿐인 질의까지 막아버리지 않도록, 요구치는 질의의 검색어 수를 넘지 않습니다.
+  const requiredMatchedTerms = Math.max(
+    1,
+    Math.min(
+      options.minLexicalMatchedTerms ?? MIN_LEXICAL_MATCHED_TERMS,
+      options.queryTermCount ?? MIN_LEXICAL_MATCHED_TERMS,
+    ),
+  );
 
   const distances = candidates
     .map((c) => c.denseDistance)
@@ -266,7 +289,10 @@ export function applyAdaptiveConfidenceFilter(
         if (candidate.exactScore > 0) {
           return { candidate, keep: true, reason: 'vector+exact' };
         }
-        if (candidate.lexicalRank != null) {
+        if (
+          candidate.lexicalRank != null &&
+          (candidate.lexicalMatchedTerms ?? 0) >= requiredMatchedTerms
+        ) {
           return { candidate, keep: true, reason: 'vector+lexical' };
         }
       }

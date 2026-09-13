@@ -29,9 +29,14 @@ const dense = (spec: ChunkSpec, distance: number): DenseHit => ({
   distance,
 });
 
-const lexical = (spec: ChunkSpec, score: number): LexicalHit => ({
+const lexical = (
+  spec: ChunkSpec,
+  score: number,
+  matchedTerms = 2,
+): LexicalHit => ({
   ...meta(spec),
   score,
+  matchedTerms,
 });
 
 function createService(options: {

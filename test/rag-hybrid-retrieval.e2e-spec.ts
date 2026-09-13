@@ -273,6 +273,48 @@ describeDatabase('Hybrid retrieval lexical search (e2e)', () => {
     expect(hits).toHaveLength(0);
   });
 
+  it('counts distinct matched terms rather than one word across fields', async () => {
+    // "안내"는 계절학기 문서의 제목·경로·요약에 모두 등장하지만 검색어는 하나뿐이다.
+    const hits = await lexicalSearch('선수과목 이수 안내');
+
+    const seasonal = hits.find((h) => h.documentId === documentIds.y2026);
+    const generic = hits.find((h) => h.documentId === documentIds.generic);
+
+    expect(seasonal?.matchedTerms).toBe(1);
+    expect(generic?.matchedTerms).toBeGreaterThanOrEqual(2);
+  });
+
+  it('stops a single common word from rescuing a middling vector hit', async () => {
+    const signals = extractQuerySignals('선수과목 이수 안내');
+    const lexicalHits = await lexicalSearch('선수과목 이수 안내');
+
+    // 계절학기 문서를 "거리는 애매하지만 lexical에 잡힌" 후보로 놓는다.
+    // 최상위 후보를 따로 두어야 near-best-vector 규칙에 걸리지 않는다.
+    const seasonal = lexicalHits.find(
+      (h) => h.documentId === documentIds.y2026,
+    )!;
+    const nearest = lexicalHits.find(
+      (h) => h.documentId === documentIds.generic,
+    )!;
+    const fused = fuseRankings({
+      denseHits: [
+        { ...nearest, distance: 0.42 },
+        { ...seasonal, distance: 0.68 },
+      ],
+      lexicalHits,
+      exactSignals: signals.exactSignals,
+    });
+    const { decisions } = applyAdaptiveConfidenceFilter(fused, {
+      queryTermCount: signals.terms.length,
+    });
+
+    const seasonalDecision = decisions.find(
+      (d) => d.candidate.documentId === documentIds.y2026,
+    );
+    expect(seasonalDecision?.keep).toBe(false);
+    expect(seasonalDecision?.reason).toBe('weak-support');
+  });
+
   it('keeps a lexical-only candidate that carries a title-strength exact match', async () => {
     // dense 후보가 전혀 없어도 exact 근거가 강하면 살아남아야 한다.
     const signals = extractQuerySignals('EC2205 선수과목');
