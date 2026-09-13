@@ -2,7 +2,6 @@ import { Inject, Injectable } from '@nestjs/common';
 import {
   and,
   asc,
-  cosineDistance,
   desc,
   eq,
   gt,
@@ -14,7 +13,12 @@ import {
   SQL,
   type SQLWrapper,
 } from 'drizzle-orm';
-import { DB_CONNECTION, documents, documentChunks } from '../db';
+import {
+  CHUNK_EMBEDDING_DIMENSIONS,
+  DB_CONNECTION,
+  documents,
+  documentChunks,
+} from '../db';
 import type { Database } from '../db';
 import type { DenseHit, LexicalHit } from './rank-fusion';
 import {
@@ -55,6 +59,18 @@ function searchableDocumentCondition(): SQL | undefined {
     eq(documents.isActive, true),
     notExpiredCondition(),
   );
+}
+
+/**
+ * HNSW 인덱스(migration 0018)와 같은 식으로 코사인 거리를 계산합니다.
+ *
+ * embedding은 vector(3072)인데 pgvector의 HNSW는 vector를 2000차원까지만
+ * 인덱싱하므로, 인덱스를 halfvec(반정밀도, 상한 4000차원) 캐스팅으로 만들었습니다.
+ * 질의도 같은 식이어야 플래너가 인덱스를 사용합니다.
+ */
+export function halfvecCosineDistance(embedding: number[]): SQL<number> {
+  const literal = `[${embedding.join(',')}]`;
+  return sql<number>`(${documentChunks.embedding}::halfvec(${sql.raw(String(CHUNK_EMBEDDING_DIMENSIONS))}) <=> ${literal}::halfvec(${sql.raw(String(CHUNK_EMBEDDING_DIMENSIONS))}))`;
 }
 
 /** ILIKE 패턴으로 감싸면서 와일드카드 문자를 이스케이프합니다. */
@@ -206,6 +222,9 @@ export class RetrievalRepository {
    *
    * 랭킹에 필요한 메타데이터(title/summary/description/sortOrder)를 함께 돌려주지만
    * 본문(content)은 포함하지 않습니다 — 후보 단계에서 큰 텍스트를 메모리로 끌어오지 않기 위함입니다.
+   *
+   * 거리 계산은 HNSW 인덱스(migration 0018)와 동일한 halfvec 캐스팅 식을 씁니다.
+   * 식이 다르면 인덱스를 타지 못하고 전체 chunk를 순차 스캔합니다.
    */
   async searchChunksByEmbedding(
     embedding: number[],
@@ -213,7 +232,7 @@ export class RetrievalRepository {
   ): Promise<DenseHit[]> {
     if (embedding.length === 0 || limit < 1) return [];
 
-    const distance = cosineDistance(documentChunks.embedding, embedding);
+    const distance = halfvecCosineDistance(embedding);
     const rows = await this.db
       .select({
         path: documentChunks.path,
