@@ -74,6 +74,14 @@ describe('extractExactSignals', () => {
     expect(signalValues('졸업하려면 130학점 필요해?')).toContain('130학점');
   });
 
+  it('does not read a measure across a space into the next word', () => {
+    // "EC2201 회로이론"의 "회"를 수량 단위로 잡으면 안 됩니다.
+    const values = signalValues('EC2201 회로이론');
+    expect(values).toContain('EC2201');
+    expect(values).not.toContain('2201회');
+    expect(signalKinds('EC2201 회로이론')).not.toContain('measure');
+  });
+
   it('returns nothing for a query with no discriminative token', () => {
     expect(signalValues('장학금 신청 방법 알려줘')).toEqual([]);
   });

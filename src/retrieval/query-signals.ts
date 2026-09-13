@@ -251,7 +251,9 @@ export function extractExactSignals(normalized: string): ExactSignal[] {
   }
 
   // 수량: 130학점, 3시간
-  const measure = /(\d{1,4})\s*(학점|시간|주|회|명|원|점|단계|개)/g;
+  // 숫자와 단위 사이의 공백은 허용하지 않습니다. 허용하면 "EC2201 회로이론"에서
+  // "2201 회"를 수량으로 잡는 등 한 글자 단위의 오탐이 발생합니다.
+  const measure = /(\d{1,4})(학점|시간|주|회|명|원|점|단계|개)/g;
   while ((match = measure.exec(normalized)) !== null) {
     pushSignal(signals, seen, `${match[1]}${match[2]}`, 'measure');
   }
