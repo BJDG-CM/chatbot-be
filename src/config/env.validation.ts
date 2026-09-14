@@ -77,6 +77,19 @@ export class EnvironmentVariables {
   @Transform(parseBooleanEnv(false))
   DB_SSL: boolean;
 
+  /** DB_SSL=true일 때 신뢰할 CA 인증서(PEM). 지정하면 인증서 검증이 켜집니다. */
+  @IsOptional()
+  @IsString()
+  DB_SSL_CA?: string;
+
+  /**
+   * DB 서버 인증서 검증 여부('true'/'false'). 미설정 시 검증하지 않고 경고만 남깁니다.
+   * 불리언으로 변환하지 않는 것은 "미설정"과 "명시적 선택"을 구분해야 하기 때문입니다.
+   */
+  @IsOptional()
+  @IsString()
+  DB_SSL_REJECT_UNAUTHORIZED?: string;
+
   // Application Configuration
   @IsNumber()
   @Min(1)
