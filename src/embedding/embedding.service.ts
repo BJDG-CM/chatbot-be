@@ -93,6 +93,9 @@ export class EmbeddingService {
               'Content-Type': 'application/json',
             },
             timeout: this.timeoutMs,
+            // 리디렉션을 따라가지 않습니다. base URL이 HTTPS여도 서버가 307/308로
+            // HTTP에 넘기면 Bearer 토큰과 질의 본문이 평문으로 재전송됩니다.
+            maxRedirects: 0,
           },
         ),
       );

@@ -28,6 +28,7 @@ import { buildDatabaseSslOptions } from '../db/ssl-options';
 import { documents, documentChunks } from '../db/schema';
 import { buildChunkEmbeddingInput } from '../embedding/chunk-embedding-input';
 import { DEFAULT_EMBEDDING_MODEL } from '../embedding/embedding.service';
+import { assertSecureEndpoint } from '../embedding/embedding-endpoint';
 
 const BATCH_SIZE = 64;
 
@@ -66,6 +67,9 @@ async function embedTexts(
       },
       body: JSON.stringify({ model, input: texts }),
       signal: controller.signal,
+      // 리디렉션을 따라가지 않습니다. HTTPS 엔드포인트가 307/308로 HTTP에 넘기면
+      // Bearer 토큰과 청크 본문이 평문으로 재전송됩니다.
+      redirect: 'error',
     });
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
@@ -100,9 +104,10 @@ async function embedTexts(
 async function main(): Promise<void> {
   const reembedAll = process.argv.includes('--all');
 
-  const embeddingBaseUrl = requireEnv(
-    'EMBEDDING_BASE_URL',
-    'LETSUR_AI_GATEWAY_BASE_URL',
+  // 앱(EmbeddingService)과 동일하게 HTTPS를 요구합니다(localhost 예외).
+  const embeddingBaseUrl = assertSecureEndpoint(
+    requireEnv('EMBEDDING_BASE_URL', 'LETSUR_AI_GATEWAY_BASE_URL'),
+    'Embedding base URL',
   );
   const embeddingApiKey = requireEnv(
     'EMBEDDING_API_KEY',
