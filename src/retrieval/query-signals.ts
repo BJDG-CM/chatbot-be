@@ -1,9 +1,9 @@
 /**
- * 질의에서 "결정적(lexical/exact) 신호"를 뽑아내는 순수 함수 모음.
+ * 질의에서 "결정적(exact) 신호"를 뽑아내는 순수 함수 모음.
  *
  * 벡터 임베딩은 문장 전체의 의미를 잘 잡지만, `EC2205`/`2026`/`2학기`/`9월 18일`처럼
  * 한 글자만 달라도 답이 완전히 달라지는 토큰은 거의 구분하지 못합니다.
- * 여기서 뽑은 신호를 lexical 검색과 exact 가점에 사용합니다.
+ * 여기서 뽑은 신호를 후보 재랭킹의 exact 가점에 사용합니다.
  *
  * DB·NestJS에 의존하지 않으므로 단독으로 단위 테스트할 수 있습니다.
  */
@@ -25,136 +25,6 @@ export type ExactSignal = {
   kind: ExactSignalKind;
 };
 
-export type QuerySignals = {
-  /** 공백·유니코드 정규화된 질의 */
-  normalized: string;
-  /** lexical 검색에 사용할 검색어(소문자). exact 신호를 앞쪽에 배치합니다. */
-  terms: string[];
-  /** 고변별 exact 신호 */
-  exactSignals: ExactSignal[];
-};
-
-/** SQL 크기와 계획 시간을 제한하기 위한 검색어 상한. */
-const MAX_TERMS = 12;
-
-/** 길이 기준으로 걸러낼 최소 토큰 길이 */
-const MIN_KOREAN_TOKEN_LENGTH = 2;
-const MIN_LATIN_TOKEN_LENGTH = 3;
-
-/**
- * 조사. 긴 것부터 검사해야 "에서는"이 "는"으로 잘못 잘리지 않습니다.
- * 형태소 분석기를 붙이지 않고, 흔한 조사만 떼는 수준으로 유지합니다.
- */
-const KOREAN_PARTICLES = [
-  '으로는',
-  '에서는',
-  '에게는',
-  '이라는',
-  '라는',
-  '이란',
-  '에서',
-  '에게',
-  '으로',
-  '부터',
-  '까지',
-  '한테',
-  '에는',
-  '에도',
-  '보다',
-  '처럼',
-  '만큼',
-  '이나',
-  '은',
-  '는',
-  '이',
-  '가',
-  '을',
-  '를',
-  '의',
-  '에',
-  '와',
-  '과',
-  '도',
-  '만',
-  '로',
-  '나',
-  '랑',
-];
-
-/** 질문 상투어. 검색어로 쓰면 노이즈만 늘어납니다. */
-const KOREAN_STOPWORDS = new Set([
-  '알려줘',
-  '알려주세요',
-  '알려',
-  '가르쳐',
-  '뭐야',
-  '무엇',
-  '어떻게',
-  '어떤',
-  '언제',
-  '어디',
-  '누구',
-  '얼마',
-  '있나요',
-  '있어',
-  '있는',
-  '있을',
-  '하나요',
-  '해줘',
-  '주세요',
-  '대해',
-  '대한',
-  '관련',
-  '관하여',
-  '궁금',
-  '궁금해',
-  '정보',
-  '내용',
-  '사항',
-  '경우',
-  '그리고',
-  '하는',
-  '되나요',
-  '인가요',
-  '입니까',
-  '건가요',
-  '싶어',
-  '싶은',
-]);
-
-const LATIN_STOPWORDS = new Set([
-  'the',
-  'and',
-  'for',
-  'with',
-  'what',
-  'when',
-  'where',
-  'how',
-  'why',
-  'who',
-  'are',
-  'was',
-  'were',
-  'does',
-  'did',
-  'can',
-  'could',
-  'should',
-  'would',
-  'tell',
-  'about',
-  'please',
-  'from',
-  'into',
-  'this',
-  'that',
-  'there',
-  'here',
-  'have',
-  'has',
-]);
-
 /** 유니코드 호환 문자 정규화 + 공백 정리 */
 export function normalizeQuery(question: string): string {
   return question.normalize('NFKC').replace(/\s+/g, ' ').trim();
@@ -165,20 +35,12 @@ export function normalizeForMatch(text: string): string {
   return text.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
 }
 
-/**
- * 흔한 조사를 한 번만 떼어냅니다.
- * "전공학과" → "전공학"처럼 과도하게 자를 수 있으므로, 호출부는 원형도 함께 보존합니다.
- */
-export function stripKoreanParticle(token: string): string {
-  if (token.length < 3) return token;
-  for (const particle of KOREAN_PARTICLES) {
-    if (token.length - particle.length < 2) continue;
-    if (token.endsWith(particle)) {
-      return token.slice(0, token.length - particle.length);
-    }
-  }
-  return token;
-}
+export type QuerySignals = {
+  /** 공백·유니코드 정규화된 질의 */
+  normalized: string;
+  /** 고변별 exact 신호 */
+  exactSignals: ExactSignal[];
+};
 
 function pushSignal(
   out: ExactSignal[],
@@ -293,56 +155,14 @@ export function extractExactSignals(normalized: string): ExactSignal[] {
   return signals;
 }
 
-/**
- * lexical 검색어 추출: exact 신호 + 한글/영문 내용어.
- * exact 신호를 앞쪽에 두어, MAX_TERMS로 잘릴 때 변별력 높은 항목이 살아남게 합니다.
- */
+/** 질의를 정규화하고 exact 신호를 뽑습니다. */
 export function extractQuerySignals(question: string): QuerySignals {
   const normalized = normalizeQuery(question ?? '');
   if (normalized.length === 0) {
-    return { normalized: '', terms: [], exactSignals: [] };
+    return { normalized: '', exactSignals: [] };
   }
 
-  const exactSignals = extractExactSignals(normalized);
-
-  const terms: string[] = [];
-  const seenTerms = new Set<string>();
-  const addTerm = (raw: string) => {
-    const term = raw.trim().toLowerCase();
-    if (term.length === 0 || seenTerms.has(term)) return;
-    seenTerms.add(term);
-    terms.push(term);
-  };
-
-  for (const signal of exactSignals) {
-    addTerm(signal.value);
-  }
-
-  const tokens = normalized.match(/[가-힣]+|[A-Za-z][A-Za-z0-9]*/g) ?? [];
-  // 긴 토큰이 대체로 더 변별력이 높아, 상한에 걸릴 때 먼저 살아남게 정렬합니다.
-  const ordered = [...tokens].sort((a, b) => b.length - a.length);
-  for (const token of ordered) {
-    if (/[가-힣]/.test(token)) {
-      if (token.length < MIN_KOREAN_TOKEN_LENGTH) continue;
-      if (KOREAN_STOPWORDS.has(token)) continue;
-      addTerm(token);
-      // 조사를 뗀 형태도 함께 넣습니다(원형을 지우지 않으므로 매칭을 잃지 않습니다).
-      const stripped = stripKoreanParticle(token);
-      if (stripped !== token && !KOREAN_STOPWORDS.has(stripped)) {
-        addTerm(stripped);
-      }
-      continue;
-    }
-    if (token.length < MIN_LATIN_TOKEN_LENGTH) continue;
-    if (LATIN_STOPWORDS.has(token.toLowerCase())) continue;
-    addTerm(token);
-  }
-
-  return {
-    normalized,
-    terms: terms.slice(0, MAX_TERMS),
-    exactSignals,
-  };
+  return { normalized, exactSignals: extractExactSignals(normalized) };
 }
 
 /**

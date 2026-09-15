@@ -5,7 +5,7 @@ import type {
   ListResourceItem,
   ListResourcesResult,
 } from './retrieval.types';
-import type { DenseHit, LexicalHit } from './rank-fusion';
+import type { DenseHit } from './rank-fusion';
 
 @Injectable()
 export class RetrievalService {
@@ -69,18 +69,6 @@ export class RetrievalService {
     limit: number,
   ): Promise<DenseHit[]> {
     return this.retrievalRepo.searchChunksByEmbedding(embedding, limit);
-  }
-
-  /**
-   * 어휘(ILIKE) 기준 상위 chunk 검색 (ready/활성/미만료 문서만).
-   * 벡터 검색이 놓치는 과목코드·연도·날짜 같은 토큰을 보완합니다.
-   */
-  async searchChunksByLexical(
-    terms: string[],
-    exactTerms: string[],
-    limit: number,
-  ): Promise<LexicalHit[]> {
-    return this.retrievalRepo.searchChunksByLexical(terms, exactTerms, limit);
   }
 
   /**

@@ -8,13 +8,11 @@ import {
   enforceDocumentDiversity,
   fuseRankings,
   type DenseHit,
-  type LexicalHit,
   type RetrievalCandidate,
 } from '../../retrieval/rank-fusion';
 import {
   DENSE_CANDIDATE_LIMIT,
   FINAL_CHUNK_LIMIT,
-  LEXICAL_CANDIDATE_LIMIT,
   MAX_CHUNKS_PER_DOCUMENT,
   MAX_VECTOR_DISTANCE,
   STRONG_VECTOR_DISTANCE,
@@ -22,11 +20,11 @@ import {
 import type { RelevantChunkSelection } from './resource-selection.service';
 
 /**
- * LLM을 쓰지 않는 하이브리드 chunk 선별.
+ * LLM을 쓰지 않는 chunk 선별.
  *
  *   질의 → 정규화·exact 신호 추출
- *        → dense Top-K(벡터) + lexical Top-K(ILIKE)  [병렬]
- *        → RRF 순위 융합 (+ exact 가점)
+ *        → dense Top-K(벡터)
+ *        → RRF 순위 융합 (dense 순위 + exact 가점)
  *        → 적응형 신뢰도 필터
  *        → 문서 다양성 정책
  *        → 최종 4~5개 + 루트 개요 chunk
@@ -45,11 +43,9 @@ export class VectorChunkSelectionService {
   private readonly logger = new Logger(VectorChunkSelectionService.name);
 
   private readonly enabled: boolean;
-  private readonly lexicalEnabled: boolean;
   private readonly maxDistance: number;
   private readonly strongDistance: number;
   private readonly denseCandidateLimit: number;
-  private readonly lexicalCandidateLimit: number;
   private readonly maxChunksPerDocument: number;
 
   constructor(
@@ -60,10 +56,6 @@ export class VectorChunkSelectionService {
     this.enabled = !isFalse(
       configService.get<string>('EMBEDDING_RETRIEVAL_ENABLED', 'true'),
     );
-    this.lexicalEnabled = !isFalse(
-      configService.get<string>('RETRIEVAL_LEXICAL_ENABLED', 'true'),
-    );
-
     this.maxDistance = positiveNumber(
       configService.get<string>('EMBEDDING_MAX_DISTANCE'),
       MAX_VECTOR_DISTANCE,
@@ -78,10 +70,6 @@ export class VectorChunkSelectionService {
     this.denseCandidateLimit = positiveNumber(
       configService.get<string>('RETRIEVAL_DENSE_CANDIDATE_LIMIT'),
       DENSE_CANDIDATE_LIMIT,
-    );
-    this.lexicalCandidateLimit = positiveNumber(
-      configService.get<string>('RETRIEVAL_LEXICAL_CANDIDATE_LIMIT'),
-      LEXICAL_CANDIDATE_LIMIT,
     );
     this.maxChunksPerDocument = positiveNumber(
       configService.get<string>('RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT'),
@@ -108,38 +96,17 @@ export class VectorChunkSelectionService {
       return null;
     }
 
-    // dense와 lexical은 서로 의존하지 않으므로 병렬로 실행해 추가 지연을 최소화합니다.
-    const useLexical = this.lexicalEnabled && signals.terms.length > 0;
-    const [denseResult, lexicalResult] = await Promise.allSettled([
-      this.retrievalService.searchChunksByEmbedding(
+    let denseHits: DenseHit[];
+    try {
+      denseHits = await this.retrievalService.searchChunksByEmbedding(
         queryEmbedding,
         this.denseCandidateLimit,
-      ),
-      useLexical
-        ? this.retrievalService.searchChunksByLexical(
-            signals.terms,
-            signals.exactSignals.map((signal) => signal.value),
-            this.lexicalCandidateLimit,
-          )
-        : Promise.resolve([] as LexicalHit[]),
-    ]);
-
-    if (denseResult.status === 'rejected') {
+      );
+    } catch (error) {
       this.logger.warn(
-        `Vector search failed; falling back to LLM: ${describeError(denseResult.reason)}`,
+        `Vector search failed; falling back to LLM: ${describeError(error)}`,
       );
       return null;
-    }
-    const denseHits: DenseHit[] = denseResult.value;
-
-    // lexical은 보조 신호이므로 실패해도 dense 단독으로 계속 진행합니다.
-    let lexicalHits: LexicalHit[] = [];
-    if (lexicalResult.status === 'fulfilled') {
-      lexicalHits = lexicalResult.value;
-    } else {
-      this.logger.warn(
-        `Lexical search failed; continuing with dense only: ${describeError(lexicalResult.reason)}`,
-      );
     }
 
     const searchMs = Date.now() - startedAt;
@@ -152,14 +119,12 @@ export class VectorChunkSelectionService {
 
     const candidates = fuseRankings({
       denseHits,
-      lexicalHits,
       exactSignals: signals.exactSignals,
     });
 
     const { kept, decisions } = applyAdaptiveConfidenceFilter(candidates, {
       maxDistance: this.maxDistance,
       strongDistance: this.strongDistance,
-      queryTermCount: signals.terms.length,
     });
 
     // 루트 개요 chunk는 세부 chunk 쿼터를 소비하지 않습니다.
@@ -185,7 +150,6 @@ export class VectorChunkSelectionService {
     this.logRetrieval({
       signals,
       denseHits,
-      lexicalHits,
       candidates,
       decisions,
       selected,
@@ -204,7 +168,6 @@ export class VectorChunkSelectionService {
   private logRetrieval(info: {
     signals: ReturnType<typeof extractQuerySignals>;
     denseHits: DenseHit[];
-    lexicalHits: LexicalHit[];
     candidates: RetrievalCandidate[];
     decisions: ReturnType<typeof applyAdaptiveConfidenceFilter>['decisions'];
     selected: RetrievalCandidate[];
@@ -214,12 +177,12 @@ export class VectorChunkSelectionService {
   }): void {
     const bestDistance = info.denseHits[0]?.distance;
     this.logger.log(
-      `[PERF] hybrid chunk selection: ${info.totalMs}ms (embed+search ${info.searchMs}ms)`,
+      `[PERF] vector chunk selection: ${info.totalMs}ms (embed+search ${info.searchMs}ms)`,
     );
     this.logger.log(
-      `[DEBUG] 하이브리드 선별: dense ${info.denseHits.length}개(최소 거리 ${
+      `[DEBUG] 벡터 선별: dense ${info.denseHits.length}개(최소 거리 ${
         bestDistance != null ? bestDistance.toFixed(3) : 'n/a'
-      }), lexical ${info.lexicalHits.length}개, 융합 후보 ${info.candidates.length}개 → ` +
+      }), 융합 후보 ${info.candidates.length}개 → ` +
         `통과 ${info.decisions.filter((d) => d.keep).length}개 → 최종 세부 ${info.selected.length}개 / 루트 ${info.rootPaths.length}개`,
     );
 
@@ -237,7 +200,6 @@ export class VectorChunkSelectionService {
         `[DEBUG] ${decision.keep ? 'KEEP' : 'DROP'} ${candidate.path} ` +
           `rrf=${candidate.fusedScore.toFixed(5)} ` +
           `dense=${candidate.denseRank ?? '-'}/${candidate.denseDistance?.toFixed(3) ?? '-'} ` +
-          `lex=${candidate.lexicalRank ?? '-'}/${candidate.lexicalScore ?? '-'} ` +
           `exact=${candidate.exactRank ?? '-'}/${candidate.exactScore}` +
           `${candidate.exactMatches.length ? `[${candidate.exactMatches.join('|')}]` : ''} ` +
           `reason=${decision.reason}`,

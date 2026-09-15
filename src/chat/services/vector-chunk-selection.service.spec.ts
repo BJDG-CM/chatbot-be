@@ -1,6 +1,6 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { VectorChunkSelectionService } from './vector-chunk-selection.service';
-import type { DenseHit, LexicalHit } from '../../retrieval/rank-fusion';
+import type { DenseHit } from '../../retrieval/rank-fusion';
 
 type ChunkSpec = {
   path: string;
@@ -29,23 +29,11 @@ const dense = (spec: ChunkSpec, distance: number): DenseHit => ({
   distance,
 });
 
-const lexical = (
-  spec: ChunkSpec,
-  score: number,
-  matchedTerms = 2,
-): LexicalHit => ({
-  ...meta(spec),
-  score,
-  matchedTerms,
-});
-
 function createService(options: {
   embeddingEnabled?: boolean;
   embedText?: () => Promise<number[]>;
   denseHits?: DenseHit[];
-  lexicalHits?: LexicalHit[];
   denseError?: Error;
-  lexicalError?: Error;
   config?: Record<string, string>;
 }) {
   const embeddingService = {
@@ -61,17 +49,6 @@ function createService(options: {
       options.denseError
         ? Promise.reject(options.denseError)
         : Promise.resolve(options.denseHits ?? []),
-    ),
-    searchChunksByLexical: jest.fn<
-      (
-        terms: string[],
-        exactTerms: string[],
-        limit: number,
-      ) => Promise<LexicalHit[]>
-    >(() =>
-      options.lexicalError
-        ? Promise.reject(options.lexicalError)
-        : Promise.resolve(options.lexicalHits ?? []),
     ),
   };
   const configService = {
@@ -116,7 +93,7 @@ describe('VectorChunkSelectionService', () => {
       expect(embeddingService.embedText).not.toHaveBeenCalled();
     });
 
-    // Case 8: embedding failure keeps the existing LLM fallback.
+    // Case 7: embedding failure keeps the existing LLM fallback.
     it('returns null when the question embedding fails', async () => {
       const { service, retrievalService } = createService({
         embedText: () => Promise.reject(new Error('boom')),
@@ -143,35 +120,6 @@ describe('VectorChunkSelectionService', () => {
         service.selectRelevantChunkPaths('질문'),
       ).resolves.toBeNull();
     });
-
-    // lexical은 보조 신호이므로 실패해도 요청을 죽이지 않습니다.
-    it('degrades to dense-only when lexical search fails', async () => {
-      const { service } = createService({
-        denseHits: [
-          dense({ path: '학사편람/졸업', resourceName: '학사편람' }, 0.3),
-        ],
-        lexicalError: new Error('pg_trgm missing'),
-      });
-
-      await expect(
-        service.selectRelevantChunkPaths('졸업요건 알려줘'),
-      ).resolves.toEqual({
-        rootPaths: ['학사편람'],
-        detailPaths: ['학사편람/졸업'],
-      });
-    });
-
-    it('skips the lexical query entirely when the kill-switch is off', async () => {
-      const { service, retrievalService } = createService({
-        config: { RETRIEVAL_LEXICAL_ENABLED: 'false' },
-        denseHits: [
-          dense({ path: '학사편람/졸업', resourceName: '학사편람' }, 0.3),
-        ],
-      });
-
-      await service.selectRelevantChunkPaths('졸업요건 알려줘');
-      expect(retrievalService.searchChunksByLexical).not.toHaveBeenCalled();
-    });
   });
 
   describe('candidate generation', () => {
@@ -184,25 +132,6 @@ describe('VectorChunkSelectionService', () => {
 
       expect(retrievalService.searchChunksByEmbedding).toHaveBeenCalledWith(
         expect.anything(),
-        20,
-      );
-      expect(retrievalService.searchChunksByLexical).toHaveBeenCalledWith(
-        expect.arrayContaining(['졸업요건']),
-        [],
-        20,
-      );
-    });
-
-    it('passes extracted exact signals to the lexical query', async () => {
-      const { service, retrievalService } = createService({
-        denseHits: [dense({ path: 'A/1', resourceName: 'A' }, 0.3)],
-      });
-
-      await service.selectRelevantChunkPaths('EC2205 선수과목 알려줘');
-
-      expect(retrievalService.searchChunksByLexical).toHaveBeenCalledWith(
-        expect.arrayContaining(['ec2205']),
-        ['EC2205'],
         20,
       );
     });
@@ -228,7 +157,7 @@ describe('VectorChunkSelectionService', () => {
     expect(selection?.rootPaths).toContain('졸업요건안내');
   });
 
-  // Case 2: an exact course code beats a closer but lexically unrelated chunk.
+  // Case 2: an exact course code beats a closer but unrelated chunk.
   it('ranks the chunk carrying the course code above a nearer generic chunk', async () => {
     const generic = {
       path: '전공교과목이수안내/선수과목',
@@ -243,7 +172,6 @@ describe('VectorChunkSelectionService', () => {
 
     const { service } = createService({
       denseHits: [dense(generic, 0.4), dense(exact, 0.52)],
-      lexicalHits: [lexical(exact, 24)],
     });
 
     const selection =
@@ -253,7 +181,7 @@ describe('VectorChunkSelectionService', () => {
   });
 
   // Case 3: the year in the query separates 2026 material from 2025 material.
-  it('prefers the year-specific document when lexical metadata supports it', async () => {
+  it('prefers the year-specific document when the query names the year', async () => {
     const y2025 = {
       path: '2025 계절학기 안내/일정',
       resourceName: '2025 계절학기 안내',
@@ -268,7 +196,6 @@ describe('VectorChunkSelectionService', () => {
     const { service } = createService({
       // 벡터만 보면 2025 쪽이 더 가깝게 나오는 상황
       denseHits: [dense(y2025, 0.42), dense(y2026, 0.46)],
-      lexicalHits: [lexical(y2026, 20)],
     });
 
     const selection =
@@ -277,47 +204,17 @@ describe('VectorChunkSelectionService', () => {
     expect(selection?.detailPaths[0]).toBe('2026 계절학기 안내/일정');
   });
 
-  // Case 4: dense and lexical agreement lifts a mid-ranked candidate.
-  it('promotes a moderately ranked vector hit that lexical search ranks first', async () => {
-    const filler = Array.from({ length: 3 }, (_, index) =>
-      dense(
-        {
-          path: `기타안내/${index}`,
-          resourceName: '기타안내',
-          documentId: '기타안내',
-        },
-        0.44 + index * 0.01,
-      ),
-    );
-    const target = { path: '장학금안내/신청절차', resourceName: '장학금안내' };
-
-    const { service } = createService({
-      denseHits: [
-        dense({ path: '생활안내/개요', resourceName: '생활안내' }, 0.41),
-        ...filler,
-        dense(target, 0.6),
-      ],
-      lexicalHits: [lexical(target, 18)],
-    });
-
-    const selection =
-      await service.selectRelevantChunkPaths('장학금 신청 절차 알려줘');
-
-    expect(selection?.detailPaths[0]).toBe('장학금안내/신청절차');
-  });
-
-  // Case 5: a strong semantic hit survives even with no lexical overlap.
-  it('keeps a strong vector-only candidate when lexical search points elsewhere', async () => {
+  // Case 4: a strong semantic hit survives even when the wording never overlaps.
+  it('keeps a strong vector hit whose wording the query never mentions', async () => {
     const semantic = { path: '학생지원/상담', resourceName: '학생지원' };
-    const lexicalOnly = {
+    const far = {
       path: '행정안내/민원',
       resourceName: '행정안내',
       title: '행정 민원 안내',
     };
 
     const { service } = createService({
-      denseHits: [dense(semantic, 0.33)],
-      lexicalHits: [lexical(lexicalOnly, 4)],
+      denseHits: [dense(semantic, 0.33), dense(far, 0.82)],
     });
 
     const selection = await service.selectRelevantChunkPaths(
@@ -325,11 +222,11 @@ describe('VectorChunkSelectionService', () => {
     );
 
     expect(selection?.detailPaths).toContain('학생지원/상담');
-    // 일반 어휘만 겹친 lexical 전용 후보는 통과하지 못합니다.
+    // 거리 상한 밖이고 exact 근거도 없는 후보는 통과하지 못합니다.
     expect(selection?.detailPaths).not.toContain('행정안내/민원');
   });
 
-  // Case 6: one document cannot own every slot.
+  // Case 5: one document cannot own every slot.
   it('does not let a single document fill the whole selection', async () => {
     const { service } = createService({
       denseHits: [
@@ -352,7 +249,7 @@ describe('VectorChunkSelectionService', () => {
     expect(selection?.detailPaths).toContain('수강안내/1');
   });
 
-  // Case 7: an unrelated question gets nothing rather than arbitrary Top-K noise.
+  // Case 6: an unrelated question gets nothing rather than arbitrary Top-K noise.
   it('returns an empty selection for an unrelated query', async () => {
     const { service } = createService({
       denseHits: [

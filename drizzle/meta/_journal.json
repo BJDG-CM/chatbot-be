@@ -124,15 +124,8 @@
     {
       "idx": 17,
       "version": "7",
-      "when": 1789302124242,
-      "tag": "0017_trigram_lexical_search",
-      "breakpoints": true
-    },
-    {
-      "idx": 18,
-      "version": "7",
       "when": 1789313689106,
-      "tag": "0018_vector_hnsw_index",
+      "tag": "0017_vector_hnsw_index",
       "breakpoints": true
     }
   ]

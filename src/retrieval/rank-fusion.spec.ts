@@ -8,7 +8,6 @@ import {
   scoreExactMatches,
   type CandidateMetadata,
   type DenseHit,
-  type LexicalHit,
   type RetrievalCandidate,
 } from './rank-fusion';
 import {
@@ -44,16 +43,6 @@ function meta(spec: ChunkSpec): CandidateMetadata {
 const dense = (spec: ChunkSpec, distance: number): DenseHit => ({
   ...meta(spec),
   distance,
-});
-
-const lexical = (
-  spec: ChunkSpec,
-  score: number,
-  matchedTerms = 2,
-): LexicalHit => ({
-  ...meta(spec),
-  score,
-  matchedTerms,
 });
 
 const candidate = (
@@ -114,10 +103,14 @@ describe('scoreExactMatches', () => {
 });
 
 describe('fuseRankings', () => {
-  it('promotes a candidate that appears in both dense and lexical results', () => {
-    // dense 1위(어휘 근거 없음) vs dense 5위 + lexical 1위
+  it('promotes a lower dense rank that carries an exact signal', () => {
+    // dense 1위(exact 근거 없음) vs dense 5위 + 제목에 과목코드
     const denseOnly = { path: 'A/1', resourceName: 'A' };
-    const both = { path: 'B/1', resourceName: 'B' };
+    const withExact = {
+      path: 'B/1',
+      resourceName: 'B',
+      title: 'EC2205 강의계획서',
+    };
 
     const fused = fuseRankings({
       denseHits: [
@@ -125,19 +118,18 @@ describe('fuseRankings', () => {
         dense({ path: 'C/1', resourceName: 'C' }, 0.45),
         dense({ path: 'C/2', resourceName: 'C' }, 0.46),
         dense({ path: 'C/3', resourceName: 'C' }, 0.47),
-        dense(both, 0.6),
+        dense(withExact, 0.6),
       ],
-      lexicalHits: [lexical(both, 12)],
-      exactSignals: [],
+      exactSignals: extractExactSignals('EC2205'),
     });
 
     expect(fused[0].path).toBe('B/1');
     expect(fused[0].denseRank).toBe(5);
-    expect(fused[0].lexicalRank).toBe(1);
+    expect(fused[0].exactRank).toBe(1);
     expect(fused[1].path).toBe('A/1');
   });
 
-  it('lets an exact signal outrank a closer but lexically unrelated chunk', () => {
+  it('lets an exact signal outrank a closer but unrelated chunk', () => {
     const signals = extractExactSignals('EC2205 선수과목');
     const unrelated = {
       path: '전공교과목안내/선수과목',
@@ -152,7 +144,6 @@ describe('fuseRankings', () => {
 
     const fused = fuseRankings({
       denseHits: [dense(unrelated, 0.4), dense(exact, 0.52)],
-      lexicalHits: [lexical(exact, 16)],
       exactSignals: signals,
     });
 
@@ -166,7 +157,6 @@ describe('fuseRankings', () => {
     const semantic = { path: 'A/1', resourceName: 'A' };
     const fused = fuseRankings({
       denseHits: [dense(semantic, 0.32)],
-      lexicalHits: [lexical({ path: 'B/1', resourceName: 'B' }, 9)],
       exactSignals: [],
     });
 
@@ -181,7 +171,6 @@ describe('fuseRankings', () => {
         dense({ path: '개요', resourceName: 'A', documentId: 'doc-a' }, 0.3),
         dense({ path: '개요', resourceName: 'B', documentId: 'doc-b' }, 0.4),
       ],
-      lexicalHits: [],
       exactSignals: [],
     });
 
@@ -194,7 +183,6 @@ describe('fuseRankings', () => {
   it('marks a chunk whose path equals the resource name as a root chunk', () => {
     const fused = fuseRankings({
       denseHits: [dense({ path: 'A', resourceName: 'A' }, 0.3)],
-      lexicalHits: [],
       exactSignals: [],
     });
     expect(fused[0].isRoot).toBe(true);
@@ -207,7 +195,6 @@ describe('fuseRankings', () => {
         dense({ path: 'A/1', resourceName: 'A', title: '2026 안내' }, 0.4),
         dense({ path: 'B/1', resourceName: 'B', title: '2026 일정' }, 0.41),
       ],
-      lexicalHits: [],
       exactSignals: signals,
     });
     expect(fused.map((c) => c.exactRank)).toEqual([1, 1]);
@@ -223,64 +210,7 @@ describe('applyAdaptiveConfidenceFilter', () => {
     expect(decisions[0].reason).toBe('strong-vector');
   });
 
-  it('keeps a middling vector hit when lexical search agrees', () => {
-    const { kept, decisions } = applyAdaptiveConfidenceFilter([
-      candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
-      candidate(
-        { path: 'B/1', resourceName: 'B' },
-        { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 2 },
-      ),
-    ]);
-    expect(kept.map((c) => c.path)).toEqual(['A/1', 'B/1']);
-    expect(decisions[1].reason).toBe('vector+lexical');
-  });
-
-  it('does not let a single common word rescue a middling vector hit', () => {
-    // "안내"처럼 흔한 단어 하나가 여러 필드에 있어 점수만 높은 경우
-    const { kept, decisions } = applyAdaptiveConfidenceFilter(
-      [
-        candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
-        candidate(
-          { path: 'B/1', resourceName: 'B' },
-          { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 1 },
-        ),
-      ],
-      { queryTermCount: 3 },
-    );
-    expect(kept.map((c) => c.path)).toEqual(['A/1']);
-    expect(decisions[1].reason).toBe('weak-support');
-  });
-
-  it('accepts lexical support once enough distinct terms match', () => {
-    const { kept, decisions } = applyAdaptiveConfidenceFilter(
-      [
-        candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
-        candidate(
-          { path: 'B/1', resourceName: 'B' },
-          { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 2 },
-        ),
-      ],
-      { queryTermCount: 3 },
-    );
-    expect(kept.map((c) => c.path)).toEqual(['A/1', 'B/1']);
-    expect(decisions[1].reason).toBe('vector+lexical');
-  });
-
-  it('still accepts a single match when the query has only one term', () => {
-    const { kept } = applyAdaptiveConfidenceFilter(
-      [
-        candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
-        candidate(
-          { path: 'B/1', resourceName: 'B' },
-          { denseDistance: 0.68, lexicalRank: 1, lexicalMatchedTerms: 1 },
-        ),
-      ],
-      { queryTermCount: 1 },
-    );
-    expect(kept.map((c) => c.path)).toEqual(['A/1', 'B/1']);
-  });
-
-  it('drops a middling vector hit with no lexical or exact support', () => {
+  it('drops a middling vector hit with no exact support', () => {
     const { kept, decisions } = applyAdaptiveConfidenceFilter([
       candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
       candidate(
@@ -323,23 +253,15 @@ describe('applyAdaptiveConfidenceFilter', () => {
     expect(decisions.every((d) => d.reason === 'distance-ceiling')).toBe(true);
   });
 
-  it('rescues a lexical-only candidate carrying a title-strength exact match', () => {
+  it('rescues a far candidate carrying a title-strength exact match', () => {
     const { kept, decisions } = applyAdaptiveConfidenceFilter([
       candidate(
         { path: 'A/1', resourceName: 'A' },
-        { lexicalRank: 1, exactScore: EXACT_FIELD_WEIGHTS.title },
+        { denseDistance: 0.9, exactScore: EXACT_FIELD_WEIGHTS.title },
       ),
     ]);
     expect(kept).toHaveLength(1);
     expect(decisions[0].reason).toBe('strong-exact');
-  });
-
-  it('drops a lexical-only candidate with only generic word overlap', () => {
-    const { kept, decisions } = applyAdaptiveConfidenceFilter([
-      candidate({ path: 'A/1', resourceName: 'A' }, { lexicalRank: 1 }),
-    ]);
-    expect(kept).toEqual([]);
-    expect(decisions[0].reason).toBe('lexical-only-weak');
   });
 });
 

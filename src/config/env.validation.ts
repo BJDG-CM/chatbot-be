@@ -194,14 +194,8 @@ export class EnvironmentVariables {
   @Transform(parseBooleanEnv(true))
   EMBEDDING_RETRIEVAL_ENABLED?: boolean;
 
-  // Hybrid retrieval (dense + lexical + exact) 튜닝
+  // 벡터 검색(dense + exact 가점) 튜닝
   // 기본값은 src/retrieval/retrieval.constants.ts 참고.
-
-  /** lexical(ILIKE) 검색 kill-switch. false면 벡터 전용으로 동작. 기본 true. */
-  @IsOptional()
-  @IsBoolean()
-  @Transform(parseBooleanEnv(true))
-  RETRIEVAL_LEXICAL_ENABLED?: boolean;
 
   /** dense 후보 풀 크기. 최종 선택 개수보다 크게 잡아 재랭킹 여지를 만듭니다. 기본 20. */
   @IsOptional()
@@ -209,13 +203,6 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(200)
   RETRIEVAL_DENSE_CANDIDATE_LIMIT?: number;
-
-  /** lexical 후보 풀 크기. 기본 20. */
-  @IsOptional()
-  @IsNumber()
-  @Min(1)
-  @Max(200)
-  RETRIEVAL_LEXICAL_CANDIDATE_LIMIT?: number;
 
   /** 추가 근거 없이도 통과시키는 코사인 거리. 기본 0.55. */
   @IsOptional()

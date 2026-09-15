@@ -5,7 +5,6 @@ import {
   matchExactSignals,
   normalizeForMatch,
   normalizeQuery,
-  stripKoreanParticle,
 } from './query-signals';
 
 const signalValues = (question: string) =>
@@ -126,60 +125,25 @@ describe('extractExactSignals', () => {
   });
 });
 
-describe('stripKoreanParticle', () => {
-  it('strips a trailing particle', () => {
-    expect(stripKoreanParticle('졸업요건은')).toBe('졸업요건');
-    expect(stripKoreanParticle('수강신청에서')).toBe('수강신청');
-  });
-
-  it('prefers the longest particle so 에서는 is not read as 는', () => {
-    expect(stripKoreanParticle('학사편람에서는')).toBe('학사편람');
-  });
-
-  it('leaves short tokens alone', () => {
-    expect(stripKoreanParticle('강의')).toBe('강의');
-    expect(stripKoreanParticle('학과')).toBe('학과');
-  });
-
-  it('never strips down below two characters', () => {
-    expect(stripKoreanParticle('회의의')).toBe('회의');
-  });
-});
-
 describe('extractQuerySignals', () => {
-  it('puts exact signals in front of ordinary terms', () => {
-    const { terms } = extractQuerySignals('EC2205 선수과목 알려줘');
-    expect(terms[0]).toBe('ec2205');
-    expect(terms).toContain('선수과목');
-  });
-
-  it('drops question filler words', () => {
-    const { terms } = extractQuerySignals('장학금에 대해 알려줘');
-    expect(terms).toContain('장학금');
-    expect(terms).not.toContain('알려줘');
-    expect(terms).not.toContain('대해');
-  });
-
-  it('keeps both the original token and its particle-stripped form', () => {
-    const { terms } = extractQuerySignals('졸업요건은 무엇인가요');
-    expect(terms).toContain('졸업요건은');
-    expect(terms).toContain('졸업요건');
+  it('normalizes the question and extracts exact signals', () => {
+    expect(extractQuerySignals('  ＥＣ2205  선수과목 ')).toEqual({
+      normalized: 'EC2205 선수과목',
+      exactSignals: [{ value: 'EC2205', kind: 'courseCode' }],
+    });
   });
 
   it('returns empty signals for an empty question', () => {
     expect(extractQuerySignals('   ')).toEqual({
       normalized: '',
-      terms: [],
       exactSignals: [],
     });
   });
 
-  it('caps the number of search terms so the SQL stays bounded', () => {
-    const question = Array.from(
-      { length: 40 },
-      (_, index) => `검색어${index}번항목`,
-    ).join(' ');
-    expect(extractQuerySignals(question).terms.length).toBeLessThanOrEqual(12);
+  it('finds no exact signal in a question made of ordinary words', () => {
+    expect(extractQuerySignals('장학금에 대해 알려줘').exactSignals).toEqual(
+      [],
+    );
   });
 });
 
