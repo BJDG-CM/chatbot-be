@@ -11,7 +11,13 @@ import {
   type LexicalHit,
   type RetrievalCandidate,
 } from './rank-fusion';
-import { EXACT_FIELD_WEIGHTS } from './retrieval.constants';
+import {
+  EXACT_FIELD_WEIGHTS,
+  MAX_VECTOR_DISTANCE,
+} from './retrieval.constants';
+
+/** 거리 상한 바로 안쪽. 상한 값을 조정해도 테스트 의도가 유지되도록 상수에서 파생합니다. */
+const JUST_INSIDE_CEILING = MAX_VECTOR_DISTANCE - 0.01;
 
 type ChunkSpec = {
   path: string;
@@ -277,7 +283,10 @@ describe('applyAdaptiveConfidenceFilter', () => {
   it('drops a middling vector hit with no lexical or exact support', () => {
     const { kept, decisions } = applyAdaptiveConfidenceFilter([
       candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.4 }),
-      candidate({ path: 'B/1', resourceName: 'B' }, { denseDistance: 0.72 }),
+      candidate(
+        { path: 'B/1', resourceName: 'B' },
+        { denseDistance: JUST_INSIDE_CEILING },
+      ),
     ]);
     expect(kept.map((c) => c.path)).toEqual(['A/1']);
     expect(decisions[1].reason).toBe('weak-support');
@@ -297,7 +306,10 @@ describe('applyAdaptiveConfidenceFilter', () => {
 
   it('never empties the result while the best hit is inside the distance ceiling', () => {
     const { kept } = applyAdaptiveConfidenceFilter([
-      candidate({ path: 'A/1', resourceName: 'A' }, { denseDistance: 0.74 }),
+      candidate(
+        { path: 'A/1', resourceName: 'A' },
+        { denseDistance: JUST_INSIDE_CEILING },
+      ),
     ]);
     expect(kept.map((c) => c.path)).toEqual(['A/1']);
   });

@@ -43,9 +43,12 @@ export const RRF_EXACT_WEIGHT = 1.5;
 
 /**
  * 코사인 거리 상한. 이보다 멀면 lexical 근거가 있어도 dense 근거로는 인정하지 않습니다.
- * PR #51에서 쓰던 값(0.75)을 그대로 승계합니다.
+ *
+ * gold set 115문항 실측에서 0.70과 0.75는 답변 가능 질의 정답률이 같고,
+ * 관련 문서가 없어야 하는 질의를 걸러내는 비율만 8.0% -> 12.0%로 달라집니다.
+ * 즉 0.75는 recall 이득 없이 오탐만 늘리므로 0.70을 씁니다.
  */
-export const MAX_VECTOR_DISTANCE = 0.75;
+export const MAX_VECTOR_DISTANCE = 0.7;
 
 /**
  * "이 정도면 추가 근거 없이도 관련 있다"고 볼 수 있는 코사인 거리.
