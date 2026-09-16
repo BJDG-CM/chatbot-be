@@ -1,12 +1,20 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { of } from 'rxjs';
 import { EmbeddingService } from './embedding.service';
+import { CHUNK_EMBEDDING_DIMENSIONS } from '../db/schema';
 
 type PostArgs = [string, unknown, Record<string, unknown>];
 
-function createService(config: Record<string, string>) {
+/** 컬럼 차원과 같은 길이의 더미 벡터. 차원 검증을 통과시키기 위함입니다. */
+const validVector = (length = CHUNK_EMBEDDING_DIMENSIONS): number[] =>
+  new Array<number>(length).fill(0.1);
+
+function createService(
+  config: Record<string, string>,
+  embedding: number[] = validVector(),
+) {
   const post = jest.fn((..._args: PostArgs) =>
-    of({ data: { data: [{ index: 0, embedding: [0.1, 0.2] }] } }),
+    of({ data: { data: [{ index: 0, embedding }] } }),
   );
   const httpService = { post } as never;
   const configService = {
@@ -61,5 +69,34 @@ describe('EmbeddingService', () => {
     expect((options.headers as Record<string, string>).Authorization).toBe(
       'Bearer secret',
     );
+  });
+
+  it('rejects a vector whose dimension does not match the column', async () => {
+    // EMBEDDING_MODEL 을 다른 차원의 모델로 바꾸면 저장 시점에야 DB 오류가 납니다.
+    // 원인에서 먼 곳에서 터지지 않도록 API 응답 경계에서 막습니다.
+    const { service } = createService(
+      { ...https, EMBEDDING_API_KEY: 'k' },
+      validVector(1536),
+    );
+
+    await expect(service.embedTexts(['hello'])).rejects.toThrow(
+      `Embedding API returned a 1536-dimension vector; expected ${CHUNK_EMBEDDING_DIMENSIONS}`,
+    );
+  });
+
+  it('rejects an empty vector', async () => {
+    const { service } = createService({ ...https, EMBEDDING_API_KEY: 'k' }, []);
+
+    await expect(service.embedTexts(['hello'])).rejects.toThrow(
+      'Embedding API returned an empty vector',
+    );
+  });
+
+  it('returns a vector that matches the column dimension', async () => {
+    const { service } = createService({ ...https, EMBEDDING_API_KEY: 'k' });
+
+    const [vector] = await service.embedTexts(['hello']);
+
+    expect(vector).toHaveLength(CHUNK_EMBEDDING_DIMENSIONS);
   });
 });

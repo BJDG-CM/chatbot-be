@@ -4,8 +4,29 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import type { AxiosError } from 'axios';
 import { assertSecureEndpoint } from './embedding-endpoint';
+import { CHUNK_EMBEDDING_DIMENSIONS } from '../db/schema';
 
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-large';
+
+/**
+ * 응답 벡터가 document_chunks.embedding 의 차원과 맞는지 확인합니다.
+ *
+ * EMBEDDING_MODEL 은 환경변수로 바꿀 수 있지만 컬럼 차원은 고정이라,
+ * 다른 차원을 쓰는 모델로 바꾸면 검증 없이는 저장 시점에야 DB 오류가 납니다.
+ * 원인에서 먼 곳에서 터지지 않도록 API 응답 경계에서 잡습니다.
+ */
+function assertChunkEmbedding(embedding: number[]): number[] {
+  if (!Array.isArray(embedding) || embedding.length === 0) {
+    throw new Error('Embedding API returned an empty vector');
+  }
+  if (embedding.length !== CHUNK_EMBEDDING_DIMENSIONS) {
+    throw new Error(
+      `Embedding API returned a ${embedding.length}-dimension vector; ` +
+        `expected ${CHUNK_EMBEDDING_DIMENSIONS}. Check EMBEDDING_MODEL.`,
+    );
+  }
+  return embedding;
+}
 
 type EmbeddingsApiResponse = {
   data: Array<{ index: number; embedding: number[] }>;
@@ -108,12 +129,7 @@ export class EmbeddingService {
       }
 
       const ordered = [...data].sort((a, b) => a.index - b.index);
-      return ordered.map((d) => {
-        if (!Array.isArray(d.embedding) || d.embedding.length === 0) {
-          throw new Error('Embedding API returned an empty vector');
-        }
-        return d.embedding;
-      });
+      return ordered.map((d) => assertChunkEmbedding(d.embedding));
     } catch (error) {
       const axiosError = error as AxiosError;
       const status = axiosError.response?.status;

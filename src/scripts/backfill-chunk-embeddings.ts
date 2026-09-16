@@ -25,7 +25,11 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { eq, isNull } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { buildDatabaseSslOptions } from '../db/ssl-options';
-import { documents, documentChunks } from '../db/schema';
+import {
+  CHUNK_EMBEDDING_DIMENSIONS,
+  documents,
+  documentChunks,
+} from '../db/schema';
 import { buildChunkEmbeddingInput } from '../embedding/chunk-embedding-input';
 import { DEFAULT_EMBEDDING_MODEL } from '../embedding/embedding.service';
 import { assertSecureEndpoint } from '../embedding/embedding-endpoint';
@@ -98,7 +102,22 @@ async function embedTexts(
       `Embedding API returned ${data?.length ?? 0} vectors for ${texts.length} inputs`,
     );
   }
-  return [...data].sort((a, b) => a.index - b.index).map((d) => d.embedding);
+  return [...data]
+    .sort((a, b) => a.index - b.index)
+    .map((d) => {
+      // 앱(EmbeddingService)과 동일한 차원 검증. 컬럼 차원은 고정이므로
+      // 다른 차원의 모델을 쓰면 저장 시점이 아니라 여기서 즉시 실패해야 합니다.
+      if (!Array.isArray(d.embedding) || d.embedding.length === 0) {
+        throw new Error('Embedding API returned an empty vector');
+      }
+      if (d.embedding.length !== CHUNK_EMBEDDING_DIMENSIONS) {
+        throw new Error(
+          `Embedding API returned a ${d.embedding.length}-dimension vector; ` +
+            `expected ${CHUNK_EMBEDDING_DIMENSIONS}. Check EMBEDDING_MODEL.`,
+        );
+      }
+      return d.embedding;
+    });
 }
 
 async function main(): Promise<void> {
