@@ -22,7 +22,8 @@ import { halfvecCosineDistance } from '../src/retrieval/retrieval.repository';
  * Seq Scan으로 조용히 떨어진다. 결과는 맞게 나오므로 단위 테스트로는 잡히지 않는다.
  *
  * 실행:
- *   RAG_RETRIEVAL_TEST_DB=true DB_NAME=..._test  *     jest --config ./test/jest-e2e.json test/rag-vector-retrieval.e2e-spec.ts
+ *   RAG_RETRIEVAL_TEST_DB=true DB_NAME=..._test \
+ *     jest --config ./test/jest-e2e.json test/rag-vector-retrieval.e2e-spec.ts
  */
 const describeDatabase =
   process.env.RAG_RETRIEVAL_TEST_DB === 'true' ? describe : describe.skip;
