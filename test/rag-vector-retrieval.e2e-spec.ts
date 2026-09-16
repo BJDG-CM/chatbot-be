@@ -9,8 +9,10 @@ import {
   type Database,
 } from '../src/db';
 import * as schema from '../src/db/schema';
-import { RetrievalRepository } from '../src/retrieval/retrieval.repository';
-import { halfvecCosineDistance } from '../src/retrieval/retrieval.repository';
+import {
+  halfvecCosineDistance,
+  RetrievalRepository,
+} from '../src/retrieval/retrieval.repository';
 
 /**
  * 벡터 검색은 생성된 SQL만으로는 검증할 수 없어 실제 PostgreSQL에 붙여서 확인한다.
@@ -43,7 +45,8 @@ describeDatabase('Vector retrieval (e2e)', () => {
     hits.filter((hit) => Object.values(documentIds).includes(hit.documentId));
 
   /**
-   * 결정적인 단위 벡터. seed 로 방향만 살짝 틀어 거리 순서를 통제한다.
+   * 결정적인 고정 벡터. seed 로 방향만 살짝 틀어 거리 순서를 통제한다.
+   * 코사인 거리는 크기에 무관하므로 정규화하지 않는다.
    * 임베딩 API를 부르지 않으므로 테스트가 외부에 의존하지 않는다.
    */
   const vec = (seed: number): number[] => {
@@ -56,7 +59,7 @@ describeDatabase('Vector retrieval (e2e)', () => {
   beforeAll(async () => {
     const database = process.env.DB_NAME ?? '';
     if (!database.endsWith('_test')) {
-      throw new Error('Hybrid retrieval E2E requires DB_NAME ending in _test');
+      throw new Error('Vector retrieval E2E requires DB_NAME ending in _test');
     }
     client = postgres({
       host: process.env.DB_HOST ?? '127.0.0.1',
@@ -254,7 +257,7 @@ describeDatabase('Vector retrieval (e2e)', () => {
   });
 
   it('uses the halfvec HNSW index rather than falling back to a sequential scan', async () => {
-    // 249행짜리 픽스처에서는 플래너가 Seq Scan 을 더 싸게 보므로, 인덱스를 "쓸 수 있는지"만 본다.
+    // 픽스처가 작아 플래너는 Seq Scan 을 더 싸게 본다. 인덱스를 "쓸 수 있는지"만 확인한다.
     // SET LOCAL 은 트랜잭션 안에서만 유효하므로 EXPLAIN 과 같은 트랜잭션에서 실행한다.
     const plan = await db.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL enable_seqscan = off`);
