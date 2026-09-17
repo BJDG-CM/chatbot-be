@@ -15,7 +15,7 @@ type EmbeddingsApiResponse = {
 
 /**
  * OpenAI 호환 /embeddings 클라이언트 (Letsur AI Gateway 등)
- * - EMBEDDING_BASE_URL/EMBEDDING_API_KEY 미설정 시 Letsur 게이트웨이 설정을 재사용합니다.
+ * - 기본 플랫폼은 Letsur 게이트웨이이고, 미설정 시 OpenRouter 설정을 사용합니다.
  * - 설정이 전혀 없으면 비활성화되어, 호출부는 LLM 선별로 폴백합니다.
  */
 @Injectable()
@@ -31,13 +31,16 @@ export class EmbeddingService {
     private readonly httpService: HttpService,
     configService: ConfigService,
   ) {
+    // 임베딩 기본 플랫폼은 Letsur 게이트웨이이고, Letsur 설정이 없을 때만 OpenRouter를 씁니다.
+    // 기동 시 한 번 정해지므로, Letsur가 실행 중에 장애를 내도 OpenRouter로 넘어가지 않습니다.
+    // 그 경우 벡터 검색이 꺼지고 호출부가 LLM 선별로 폴백합니다.
     const baseUrl =
-      configService.get<string>('EMBEDDING_BASE_URL') ||
       configService.get<string>('LETSUR_AI_GATEWAY_BASE_URL') ||
+      configService.get<string>('OPEN_ROUTER_BASE_URL') ||
       '';
     const apiKey =
-      configService.get<string>('EMBEDDING_API_KEY') ||
       configService.get<string>('LETSUR_AI_GATEWAY_API_KEY') ||
+      configService.get<string>('OPEN_ROUTER_API_KEY') ||
       '';
 
     // Bearer 토큰이 평문으로 나가지 않도록 HTTPS를 요구합니다(localhost는 예외).
@@ -61,7 +64,7 @@ export class EmbeddingService {
 
     if (!this.isEnabled()) {
       this.logger.warn(
-        'Embedding API not configured (EMBEDDING_BASE_URL/LETSUR_AI_GATEWAY_BASE_URL missing); vector retrieval disabled',
+        'Embedding API not configured (LETSUR_AI_GATEWAY_BASE_URL/OPEN_ROUTER_BASE_URL missing); vector retrieval disabled',
       );
     }
   }

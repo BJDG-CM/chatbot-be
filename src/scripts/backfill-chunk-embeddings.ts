@@ -17,7 +17,7 @@
  *
  * 실행:
  *   DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (필요 시 DB_SSL=true)과
- *   LETSUR_AI_GATEWAY_BASE_URL/API_KEY (또는 EMBEDDING_BASE_URL/API_KEY) 설정 후
+ *   LETSUR_AI_GATEWAY_BASE_URL/API_KEY (Letsur 설정이 없을 때만 OPEN_ROUTER_*) 설정 후
  *   `bun run db:backfill:embeddings` (전체 재임베딩: `bun run db:backfill:embeddings --all`)
  */
 import postgres from 'postgres';
@@ -101,12 +101,12 @@ async function main(): Promise<void> {
 
   // 앱(EmbeddingService)과 동일하게 HTTPS를 요구합니다(localhost 예외).
   const embeddingBaseUrl = assertSecureEndpoint(
-    requireEnv('EMBEDDING_BASE_URL', 'LETSUR_AI_GATEWAY_BASE_URL'),
+    requireEnv('LETSUR_AI_GATEWAY_BASE_URL', 'OPEN_ROUTER_BASE_URL'),
     'Embedding base URL',
   );
   const embeddingApiKey = requireEnv(
-    'EMBEDDING_API_KEY',
     'LETSUR_AI_GATEWAY_API_KEY',
+    'OPEN_ROUTER_API_KEY',
   );
   const embeddingModel = process.env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
 

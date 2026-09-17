@@ -168,13 +168,6 @@ export class EnvironmentVariables {
   OPEN_ROUTER_BASE_URL?: string;
 
   // Embedding API (벡터 검색용). 미설정 시 Letsur 게이트웨이 설정을 재사용.
-  @IsOptional()
-  @IsString()
-  EMBEDDING_BASE_URL?: string;
-
-  @IsOptional()
-  @IsString()
-  EMBEDDING_API_KEY?: string;
 
   // 기본값: text-embedding-3-large. 변경 시 차원 마이그레이션 + 전체 재임베딩 필요.
   @IsOptional()
