@@ -3,7 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import type { AxiosError } from 'axios';
-import { assertSecureEndpoint } from './embedding-endpoint';
+import {
+  assertSecureEndpoint,
+  resolveEmbeddingCredentials,
+} from './embedding-endpoint';
 import { parseEmbeddingResponse } from './embedding-response';
 
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-large';
@@ -32,16 +35,14 @@ export class EmbeddingService {
     configService: ConfigService,
   ) {
     // 임베딩 기본 플랫폼은 Letsur 게이트웨이이고, Letsur 설정이 없을 때만 OpenRouter를 씁니다.
+    // URL과 키는 반드시 같은 공급자에서 쌍으로 가져옵니다(resolveEmbeddingCredentials 참고).
     // 기동 시 한 번 정해지므로, Letsur가 실행 중에 장애를 내도 OpenRouter로 넘어가지 않습니다.
     // 그 경우 벡터 검색이 꺼지고 호출부가 LLM 선별로 폴백합니다.
-    const baseUrl =
-      configService.get<string>('LETSUR_AI_GATEWAY_BASE_URL') ||
-      configService.get<string>('OPEN_ROUTER_BASE_URL') ||
-      '';
-    const apiKey =
-      configService.get<string>('LETSUR_AI_GATEWAY_API_KEY') ||
-      configService.get<string>('OPEN_ROUTER_API_KEY') ||
-      '';
+    const credentials = resolveEmbeddingCredentials((key) =>
+      configService.get<string>(key),
+    );
+    const baseUrl = credentials?.baseUrl ?? '';
+    const apiKey = credentials?.apiKey ?? '';
 
     // Bearer 토큰이 평문으로 나가지 않도록 HTTPS를 요구합니다(localhost는 예외).
     // 잘못 설정된 경우 임베딩을 비활성화해, 호출부가 LLM 선별로 폴백하게 둡니다.

@@ -17,7 +17,7 @@
  *
  * 실행:
  *   DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME (필요 시 DB_SSL=true)과
- *   LETSUR_AI_GATEWAY_BASE_URL/API_KEY (Letsur 설정이 없을 때만 OPEN_ROUTER_*) 설정 후
+ *   LETSUR_AI_GATEWAY_BASE_URL/API_KEY 쌍 (없으면 OPEN_ROUTER_* 쌍) 설정 후
  *   `bun run db:backfill:embeddings` (전체 재임베딩: `bun run db:backfill:embeddings --all`)
  */
 import postgres from 'postgres';
@@ -28,7 +28,10 @@ import { buildDatabaseSslOptions } from '../db/ssl-options';
 import { documents, documentChunks } from '../db/schema';
 import { buildChunkEmbeddingInput } from '../embedding/chunk-embedding-input';
 import { DEFAULT_EMBEDDING_MODEL } from '../embedding/embedding.service';
-import { assertSecureEndpoint } from '../embedding/embedding-endpoint';
+import {
+  assertSecureEndpoint,
+  resolveEmbeddingCredentials,
+} from '../embedding/embedding-endpoint';
 import { parseEmbeddingResponse } from '../embedding/embedding-response';
 
 const BATCH_SIZE = 64;
@@ -99,15 +102,20 @@ async function embedTexts(
 async function main(): Promise<void> {
   const reembedAll = process.argv.includes('--all');
 
-  // 앱(EmbeddingService)과 동일하게 HTTPS를 요구합니다(localhost 예외).
+  // 앱(EmbeddingService)과 동일한 규칙: URL과 키를 같은 공급자에서 쌍으로 고르고,
+  // HTTPS를 요구합니다(localhost 예외).
+  const credentials = resolveEmbeddingCredentials((key) => process.env[key]);
+  if (!credentials) {
+    throw new Error(
+      'Missing embedding credentials: set LETSUR_AI_GATEWAY_BASE_URL/API_KEY ' +
+        '(or OPEN_ROUTER_BASE_URL/API_KEY) as a pair',
+    );
+  }
   const embeddingBaseUrl = assertSecureEndpoint(
-    requireEnv('LETSUR_AI_GATEWAY_BASE_URL', 'OPEN_ROUTER_BASE_URL'),
+    credentials.baseUrl,
     'Embedding base URL',
   );
-  const embeddingApiKey = requireEnv(
-    'LETSUR_AI_GATEWAY_API_KEY',
-    'OPEN_ROUTER_API_KEY',
-  );
+  const embeddingApiKey = credentials.apiKey;
   const embeddingModel = process.env.EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
 
   const client = postgres({

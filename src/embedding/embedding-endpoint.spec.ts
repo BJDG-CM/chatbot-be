@@ -1,5 +1,9 @@
 import { describe, expect, it } from '@jest/globals';
-import { assertSecureEndpoint, isLocalHostname } from './embedding-endpoint';
+import {
+  assertSecureEndpoint,
+  isLocalHostname,
+  resolveEmbeddingCredentials,
+} from './embedding-endpoint';
 
 describe('isLocalHostname', () => {
   it('recognises the usual loopback spellings', () => {
@@ -43,5 +47,68 @@ describe('assertSecureEndpoint', () => {
     expect(() => assertSecureEndpoint('not a url', 'x')).toThrow(
       /not a valid URL/,
     );
+  });
+});
+
+describe('resolveEmbeddingCredentials', () => {
+  const read = (env: Record<string, string>) => (key: string) => env[key];
+
+  it('prefers Letsur when its URL and key are both present', () => {
+    expect(
+      resolveEmbeddingCredentials(
+        read({
+          LETSUR_AI_GATEWAY_BASE_URL: 'https://gw.letsur.ai/v1',
+          LETSUR_AI_GATEWAY_API_KEY: 'letsur-key',
+          OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+          OPEN_ROUTER_API_KEY: 'or-key',
+        }),
+      ),
+    ).toEqual({
+      provider: 'letsur',
+      baseUrl: 'https://gw.letsur.ai/v1',
+      apiKey: 'letsur-key',
+    });
+  });
+
+  it('falls back to OpenRouter when Letsur is not configured', () => {
+    expect(
+      resolveEmbeddingCredentials(
+        read({
+          OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+          OPEN_ROUTER_API_KEY: 'or-key',
+        }),
+      ),
+    ).toEqual({
+      provider: 'openrouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'or-key',
+    });
+  });
+
+  it('never pairs one provider URL with another provider key', () => {
+    // Letsur URL 만 있고 키가 없으면, OpenRouter 키를 Letsur 로 보내면 안 된다.
+    const resolved = resolveEmbeddingCredentials(
+      read({
+        LETSUR_AI_GATEWAY_BASE_URL: 'https://gw.letsur.ai/v1',
+        OPEN_ROUTER_API_KEY: 'or-key',
+      }),
+    );
+
+    expect(resolved).toBeNull();
+  });
+
+  it('ignores a provider whose URL is missing even if its key is set', () => {
+    const resolved = resolveEmbeddingCredentials(
+      read({
+        LETSUR_AI_GATEWAY_API_KEY: 'letsur-key',
+        OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+      }),
+    );
+
+    expect(resolved).toBeNull();
+  });
+
+  it('returns null when nothing is configured', () => {
+    expect(resolveEmbeddingCredentials(read({}))).toBeNull();
   });
 });
