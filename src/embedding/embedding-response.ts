@@ -65,5 +65,15 @@ export function assertChunkEmbedding(embedding: number[]): number[] {
         `expected ${CHUNK_EMBEDDING_DIMENSIONS}. Check EMBEDDING_MODEL.`,
     );
   }
+  // pgvector는 NaN/Infinity를 거부하고, 거리 계산은 join(',')으로 리터럴을 만듭니다.
+  // 문자열이나 null이 섞이면 깨진 리터럴이 그대로 DB로 갑니다.
+  const invalid = embedding.findIndex(
+    (value) => typeof value !== 'number' || !Number.isFinite(value),
+  );
+  if (invalid !== -1) {
+    throw new Error(
+      `Embedding API returned a non-finite value at index ${invalid}`,
+    );
+  }
   return embedding;
 }

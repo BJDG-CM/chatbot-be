@@ -73,4 +73,23 @@ describe('parseEmbeddingResponse', () => {
       'returned 0 vectors for 1 inputs',
     );
   });
+
+  it('rejects a vector containing a non-numeric value', () => {
+    // 길이만 맞고 원소가 문자열이면 깨진 벡터 리터럴이 DB로 넘어갑니다.
+    const broken = vector(0.1);
+    broken[7] = 'oops' as unknown as number;
+
+    expect(() =>
+      parseEmbeddingResponse([{ index: 0, embedding: broken }], 1),
+    ).toThrow('non-finite value at index 7');
+  });
+
+  it('rejects a vector containing NaN', () => {
+    const broken = vector(0.1);
+    broken[3] = Number.NaN;
+
+    expect(() =>
+      parseEmbeddingResponse([{ index: 0, embedding: broken }], 1),
+    ).toThrow('non-finite value at index 3');
+  });
 });
